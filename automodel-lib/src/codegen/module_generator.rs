@@ -1038,12 +1038,14 @@ fn generate_conditional_function_body(
     }
 
     // Create conditional block info (without fixed parameter numbers)
+    // Each block keeps the full list of its parameters so that blocks containing
+    // more than one parameter (e.g. `#[AND (a, b) > (#{x?}, #{y?})]`) are fully
+    // renumbered and bound rather than only their first parameter.
     let mut conditional_replacements = Vec::new();
     for (i, block) in parsed_sql.conditional_blocks.iter().enumerate() {
         if !block.parameters.is_empty() {
-            let first_param = &block.parameters[0];
             let block_sql = block.sql_content.clone(); // Keep original parameter syntax for now
-            conditional_replacements.push((i, block_sql, first_param.clone()));
+            conditional_replacements.push((i, block_sql, block.parameters.clone()));
         }
     }
 
@@ -1054,12 +1056,11 @@ fn generate_conditional_function_body(
     body.push_str("    let mut included_params = Vec::new();\n\n");
 
     // Replace each conditional block based on parameter presence or diff
-    for (_, block_sql, param_name) in &conditional_replacements {
-        let clean_param = if param_name.ends_with('?') {
-            param_name.trim_end_matches('?')
-        } else {
-            param_name
-        };
+    for (_, block_sql, block_params) in &conditional_replacements {
+        // The whole block is included/excluded based on its first parameter.
+        // All parameters of the block are then included together.
+        let gate_param = &block_params[0];
+        let clean_gate = gate_param.trim_end_matches('?');
 
         let conditional_block = format!("#[{}]", block_sql);
 
@@ -1067,14 +1068,14 @@ fn generate_conditional_function_body(
             // For conditions_type, check if old and new values differ
             body.push_str(&format!(
                 "    if old.{} != new.{} {{\n",
-                clean_param, clean_param
+                clean_gate, clean_gate
             ));
         } else if use_structured_params {
             // For parameters_type, check if parameter is Some (for Option types)
-            body.push_str(&format!("    if params.{}.is_some() {{\n", clean_param));
+            body.push_str(&format!("    if params.{}.is_some() {{\n", clean_gate));
         } else {
             // For regular conditional, check if parameter is Some
-            body.push_str(&format!("    if {}.is_some() {{\n", clean_param));
+            body.push_str(&format!("    if {}.is_some() {{\n", clean_gate));
         }
 
         body.push_str(&format!(
@@ -1082,10 +1083,13 @@ fn generate_conditional_function_body(
             conditional_block,
             &conditional_block[2..conditional_block.len() - 1]
         ));
-        body.push_str(&format!(
-            "        included_params.push(\"{}\");\n",
-            clean_param
-        ));
+        for param_name in block_params {
+            let clean_param = param_name.trim_end_matches('?');
+            body.push_str(&format!(
+                "        included_params.push(\"{}\");\n",
+                clean_param
+            ));
+        }
         body.push_str("    } else {\n");
         body.push_str(&format!(
             "        final_sql = final_sql.replace(r\"{}\", \"\");\n",
@@ -1109,23 +1113,21 @@ fn generate_conditional_function_body(
     }
 
     // Renumber conditional parameters that are included
-    for (_, _, param_name) in &conditional_replacements {
-        let clean_param = if param_name.ends_with('?') {
-            param_name.trim_end_matches('?')
-        } else {
-            param_name
-        };
+    for (_, _, block_params) in &conditional_replacements {
+        for param_name in block_params {
+            let clean_param = param_name.trim_end_matches('?');
 
-        body.push_str(&format!(
-            "    if included_params.contains(&r\"{}\") {{\n",
-            clean_param
-        ));
-        body.push_str(&format!(
-            "        final_sql = final_sql.replace(r\"#{{{}}}\", &format!(\"${{}}\", param_counter));\n",
-            param_name
-        ));
-        body.push_str("        param_counter += 1;\n");
-        body.push_str("    }\n");
+            body.push_str(&format!(
+                "    if included_params.contains(&r\"{}\") {{\n",
+                clean_param
+            ));
+            body.push_str(&format!(
+                "        final_sql = final_sql.replace(r\"#{{{}}}\", &format!(\"${{}}\", param_counter));\n",
+                param_name
+            ));
+            body.push_str("        param_counter += 1;\n");
+            body.push_str("    }\n");
+        }
     }
 
     // Ensure param_counter is marked as used to avoid unused assignment warnings
@@ -1180,78 +1182,76 @@ fn generate_conditional_function_body(
     }
 
     // Then, bind conditional parameters only if they are included
-    for (_, _, param_name) in &conditional_replacements {
-        let clean_param = if param_name.ends_with('?') {
-            param_name.trim_end_matches('?')
-        } else {
-            param_name
-        };
+    for (_, _, block_params) in &conditional_replacements {
+        for param_name in block_params {
+            let clean_param = param_name.trim_end_matches('?');
 
-        body.push_str(&format!(
-            "    if included_params.contains(&r\"{}\") {{\n",
-            clean_param
-        ));
+            body.push_str(&format!(
+                "    if included_params.contains(&r\"{}\") {{\n",
+                clean_param
+            ));
 
-        if let Some(param_index) = all_params.iter().position(|p| {
-            let clean_p = if p.ends_with('?') {
-                p.trim_end_matches('?')
-            } else {
-                p
-            };
-            clean_p == clean_param
-        }) {
-            if let Some(rust_type_info) = type_info.input_types.get(param_index) {
-                if rust_type_info.needs_json_wrapper {
-                    if rust_type_info.is_pg_array() {
-                        // For jsonb[] columns: serialize each element individually
-                        if use_conditional_diff {
-                            body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = new.{}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
-                        } else if use_structured_params {
-                            body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = params.{}.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
+            if let Some(param_index) = all_params.iter().position(|p| {
+                let clean_p = if p.ends_with('?') {
+                    p.trim_end_matches('?')
+                } else {
+                    p
+                };
+                clean_p == clean_param
+            }) {
+                if let Some(rust_type_info) = type_info.input_types.get(param_index) {
+                    if rust_type_info.needs_json_wrapper {
+                        if rust_type_info.is_pg_array() {
+                            // For jsonb[] columns: serialize each element individually
+                            if use_conditional_diff {
+                                body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = new.{}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
+                            } else if use_structured_params {
+                                body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = params.{}.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
+                            } else {
+                                body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = {}.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
+                            }
                         } else {
-                            body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = {}.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
+                            if use_conditional_diff {
+                                // For conditions_type, use new.field directly
+                                body.push_str(&format!("        let {}_json = serde_json::to_value(&new.{}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
+                            } else if use_structured_params {
+                                // For parameters_type, unwrap from params struct
+                                body.push_str(&format!("        let {}_json = serde_json::to_value(&params.{}.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
+                            } else {
+                                // For regular conditional, unwrap the Option
+                                body.push_str(&format!("        let {}_json = serde_json::to_value(&{}.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
+                            }
                         }
+                        body.push_str(&format!(
+                            "        query = query.bind({}_json);\n",
+                            clean_param
+                        ));
                     } else {
                         if use_conditional_diff {
-                            // For conditions_type, use new.field directly
-                            body.push_str(&format!("        let {}_json = serde_json::to_value(&new.{}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
+                            // For conditions_type, bind new.field directly
+                            body.push_str(&format!(
+                                "        query = query.bind(&new.{});\n",
+                                clean_param
+                            ));
                         } else if use_structured_params {
                             // For parameters_type, unwrap from params struct
-                            body.push_str(&format!("        let {}_json = serde_json::to_value(&params.{}.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
+                            body.push_str(&format!(
+                                "        query = query.bind(params.{}.as_ref().unwrap());\n",
+                                clean_param
+                            ));
                         } else {
                             // For regular conditional, unwrap the Option
-                            body.push_str(&format!("        let {}_json = serde_json::to_value(&{}.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
+                            body.push_str(&format!(
+                                "        query = query.bind({}.as_ref().unwrap());\n",
+                                clean_param
+                            ));
                         }
-                    }
-                    body.push_str(&format!(
-                        "        query = query.bind({}_json);\n",
-                        clean_param
-                    ));
-                } else {
-                    if use_conditional_diff {
-                        // For conditions_type, bind new.field directly
-                        body.push_str(&format!(
-                            "        query = query.bind(&new.{});\n",
-                            clean_param
-                        ));
-                    } else if use_structured_params {
-                        // For parameters_type, unwrap from params struct
-                        body.push_str(&format!(
-                            "        query = query.bind(params.{}.as_ref().unwrap());\n",
-                            clean_param
-                        ));
-                    } else {
-                        // For regular conditional, unwrap the Option
-                        body.push_str(&format!(
-                            "        query = query.bind({}.as_ref().unwrap());\n",
-                            clean_param
-                        ));
                     }
                 }
             }
-        }
 
-        body.push_str("    }\n\n");
+            body.push_str("    }\n\n");
+        }
     }
 
     generate_query_execution(body, query, type_info, return_type);

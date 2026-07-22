@@ -324,14 +324,12 @@ pub struct FindUsersByNameAndAgeItem {
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 /// 
 /// === find_users_by_name_and_age (variant 1) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (age >= 0)
+/// Index Scan using idx_users_age_updated_at on users
+///   Index Cond: (age >= 0)
 ///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
-///   ->  Bitmap Index Scan on idx_users_age
-///         Index Cond: (age >= 0)
 /// 
 /// === find_users_by_name_and_age (variant 2) ===
-/// Index Scan using idx_users_age on users
+/// Index Scan using idx_users_age_updated_at on users
 ///   Index Cond: (age <= 0)
 ///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age \nFROM public.users \nWHERE name ILIKE #{name_pattern} \n#[AND age >= #{min_age?}] \nAND name = #{name_exact} \n#[AND age <= #{max_age?}] \nORDER BY name"))]
@@ -568,10 +566,8 @@ pub struct SearchUsersAdvancedItem {
 /// === search_users_advanced (variant 2) ===
 /// Sort
 ///   Sort Key: created_at DESC
-///   ->  Bitmap Heap Scan on users
-///         Recheck Cond: (age >= 0)
-///         ->  Bitmap Index Scan on idx_users_age
-///               Index Cond: (age >= 0)
+///   ->  Index Scan using idx_users_age_updated_at on users
+///         Index Cond: (age >= 0)
 /// 
 /// === search_users_advanced (variant 3) ===
 /// Sort
@@ -1249,9 +1245,9 @@ pub struct GetUserByIdAndEmailItem {
 /// Get a user by ID and email - generates GetUserByIdAndEmailParams struct and GetUserByIdAndEmailItem return struct
 ///
 /// Query Plan:
-/// Index Scan using users_pkey on users
-///   Index Cond: (id = 0)
-///   Filter: ((email)::text = 'dummy'::text)
+/// Index Scan using users_email_key on users
+///   Index Cond: ((email)::text = 'dummy'::text)
+///   Filter: (id = 0)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email \nFROM public.users \nWHERE id = #{id} AND email = #{email}"))]
 pub async fn get_user_by_id_and_email(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, params: &GetUserByIdAndEmailParams) -> Result<Option<GetUserByIdAndEmailItem>, super::ErrorReadOnly> {
     let query = sqlx::query(
@@ -1825,9 +1821,9 @@ pub async fn search_user_details(executor: impl sqlx::Executor<'_, Database = sq
 /// Find user by criteria - uses GetUserByIdAndEmailParams for params and UserSummary for return
 ///
 /// Query Plan:
-/// Index Scan using users_pkey on users
-///   Index Cond: (id = 0)
-///   Filter: ((email)::text = 'dummy'::text)
+/// Index Scan using users_email_key on users
+///   Index Cond: ((email)::text = 'dummy'::text)
+///   Filter: (id = 0)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email \nFROM public.users \nWHERE id = #{id} AND email = #{email}"))]
 pub async fn find_user_by_criteria(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, params: &GetUserByIdAndEmailParams) -> Result<Option<UserSummary>, super::ErrorReadOnly> {
     let query = sqlx::query(
@@ -2148,6 +2144,87 @@ pub async fn insert_user_with_social_links(executor: impl sqlx::Executor<'_, Dat
             .transpose()?,
     })
     })();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct GetUsersCursorItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Keyset pagination over users using a two-parameter conditional cursor block
+///
+/// Query Plan:
+/// === get_users_cursor (base) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: updated_at, id
+///         Presorted Key: updated_at
+///         ->  Index Scan using idx_users_updated_at on users
+/// 
+/// === get_users_cursor (variant 1) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: updated_at, id
+///         Presorted Key: updated_at
+///         ->  Index Scan using idx_users_updated_at on users
+///               Index Cond: (updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
+///               Filter: (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, updated_at\nFROM public.users\nWHERE 1 = 1\n#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]\nORDER BY updated_at ASC, id ASC\nLIMIT #{page_size}"))]
+pub async fn get_users_cursor(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, cursor_ua_asc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_id: Option<i32>, page_size: i64) -> Result<Vec<GetUsersCursorItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT id, name, email, updated_at
+FROM public.users
+WHERE 1 = 1
+#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]
+ORDER BY updated_at ASC, id ASC
+LIMIT $1".to_string();
+    let mut included_params = Vec::new();
+
+    if cursor_ua_asc_ts.is_some() {
+        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", r"AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})");
+        included_params.push("cursor_ua_asc_ts");
+        included_params.push("cursor_ua_asc_id");
+    } else {
+        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", "");
+    }
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{page_size}", &format!("${}", param_counter));
+    param_counter += 1;
+    if included_params.contains(&r"cursor_ua_asc_ts") {
+        final_sql = final_sql.replace(r"#{cursor_ua_asc_ts?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_ua_asc_id") {
+        final_sql = final_sql.replace(r"#{cursor_ua_asc_id?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&page_size);
+    if included_params.contains(&r"cursor_ua_asc_ts") {
+        query = query.bind(cursor_ua_asc_ts.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_ua_asc_id") {
+        query = query.bind(cursor_ua_asc_id.as_ref().unwrap());
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(GetUsersCursorItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
+        updated_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")?,
+    })
+    }).collect();
     result.map_err(Into::into)
 }
 

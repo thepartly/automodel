@@ -27,11 +27,10 @@ pub struct GetUserActivitySummaryItem {
 ///                     Sort Key: users.created_at DESC
 ///                     ->  Seq Scan on users
 ///                           Filter: (created_at > (now - '30 days'::interval))
-///         ->  Materialize
-///               ->  Aggregate
-///                     ->  Seq Scan on users users_1
+///         ->  Aggregate
+///               ->  Seq Scan on users users_1
 /// JIT:
-///   Functions: 14
+///   Functions: 13
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "WITH recent_users AS (\n  SELECT id, name, email, created_at,\n         ROW_NUMBER() OVER (ORDER BY created_at DESC) as rank\n  FROM public.users \n  WHERE created_at > NOW() - INTERVAL '30 days'\n),\nuser_stats AS (\n  SELECT \n    COUNT(*) as total_users,\n    COUNT(CASE WHEN created_at > NOW() - INTERVAL '7 days' THEN 1 END) as weekly_users,\n    AVG(age)::float8 as avg_age\n  FROM public.users\n)\nSELECT \n  ru.id,\n  ru.name, \n  ru.email,\n  ru.created_at,\n  ru.rank,\n  us.total_users,\n  us.weekly_users,\n  us.avg_age\nFROM recent_users ru\nCROSS JOIN user_stats us\nWHERE ru.rank <= 10\nORDER BY ru.rank"))]
 pub async fn get_user_activity_summary(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<Vec<GetUserActivitySummaryItem>, super::ErrorReadOnly> {
@@ -99,13 +98,11 @@ pub struct GetHierarchicalUserDataItem {
 ///     ->  Recursive Union
 ///           ->  Seq Scan on users
 ///                 Filter: (referrer_id IS NULL)
-///           ->  Hash Join
-///                 Hash Cond: (u.referrer_id = uh_1.id)
-///                 Join Filter: (u.id <> ALL (uh_1.path))
+///           ->  Nested Loop
+///                 Join Filter: ((u.referrer_id = uh_1.id) AND (u.id <> ALL (uh_1.path)))
 ///                 ->  Seq Scan on users u
-///                 ->  Hash
-///                       ->  WorkTable Scan on user_hierarchy uh_1
-///                             Filter: (level < 5)
+///                 ->  WorkTable Scan on user_hierarchy uh_1
+///                       Filter: (level < 5)
 ///   ->  Sort
 ///         Sort Key: uh.level, uh.name, uh.id, uh.email, uh.referrer_id, uh.path
 ///         ->  Merge Left Join
@@ -117,7 +114,7 @@ pub struct GetHierarchicalUserDataItem {
 ///                     Sort Key: referrals.referrer_id
 ///                     ->  Seq Scan on users referrals
 /// JIT:
-///   Functions: 29
+///   Functions: 23
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "WITH RECURSIVE user_hierarchy AS (\n  -- Base case: public.users without referrers (or top-level public.users)\n  SELECT \n    id, \n    name, \n    email, \n    NULL::integer as referrer_id,\n    1 as level,\n    ARRAY[id] as path\n  FROM public.users \n  WHERE referrer_id IS NULL\n  \n  UNION ALL\n  \n  -- Recursive case: public.users with referrers\n  SELECT \n    u.id,\n    u.name,\n    u.email,\n    u.referrer_id,\n    uh.level + 1,\n    uh.path || u.id\n  FROM public.users u\n  INNER JOIN user_hierarchy uh ON u.referrer_id = uh.id\n  WHERE u.id != ALL(uh.path) -- Prevent cycles\n  AND uh.level < 5 -- Limit depth\n)\nSELECT \n  uh.id,\n  uh.name,\n  uh.email,\n  uh.referrer_id,\n  uh.level,\n  uh.path,\n  COUNT(referrals.id) as direct_referrals_count\nFROM user_hierarchy uh\nLEFT JOIN public.users referrals ON referrals.referrer_id = uh.id\nGROUP BY uh.id, uh.name, uh.email, uh.referrer_id, uh.level, uh.path\nORDER BY uh.level, uh.name"))]
 pub async fn get_hierarchical_user_data(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<Vec<GetHierarchicalUserDataItem>, super::ErrorReadOnly> {
@@ -202,18 +199,19 @@ pub struct GetUserActivityWithPostsItem {
 ///   ->  Merge Left Join
 ///         Merge Cond: (p.id = comments.post_id)
 ///         ->  Nested Loop
+///               Join Filter: (u.id = p.author_id)
 ///               ->  Index Scan using posts_pkey on posts p
 ///                     Filter: ((published_at IS NOT NULL) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone))
-///               ->  Index Scan using users_pkey on users u
-///                     Index Cond: (id = p.author_id)
-///                     Filter: (created_at > '1970-01-01 00:00:00+00'::timestamp with time zone)
+///               ->  Materialize
+///                     ->  Index Scan using users_pkey on users u
+///                           Filter: (created_at > '1970-01-01 00:00:00+00'::timestamp with time zone)
 ///         ->  GroupAggregate
 ///               Group Key: comments.post_id
 ///               ->  Sort
 ///                     Sort Key: comments.post_id
 ///                     ->  Seq Scan on comments
 /// JIT:
-///   Functions: 19
+///   Functions: 21
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT \n  u.id as user_id,\n  u.name,\n  u.email,\n  u.created_at as user_created_at,\n  u.updated_at as user_updated_at,\n  p.id as post_id,\n  p.title,\n  p.content,\n  p.created_at as post_created_at,\n  p.published_at,\n  c.comment_count,\n  EXTRACT(EPOCH FROM (NOW() - p.created_at))::float8/3600 as hours_since_post,\n  DATE_TRUNC('day', p.created_at) as post_date\nFROM public.users u\nINNER JOIN public.posts p ON u.id = p.author_id\nLEFT JOIN (\n  SELECT post_id, COUNT(*) as comment_count\n  FROM public.comments \n  GROUP BY post_id\n) c ON p.id = c.post_id\nWHERE u.created_at > #{since}\n  AND p.published_at IS NOT NULL\n  AND p.created_at BETWEEN #{start_date} AND #{end_date}\nORDER BY p.created_at DESC, u.name"))]
 pub async fn get_user_activity_with_posts(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, since: chrono::DateTime<chrono::Utc>, start_date: chrono::DateTime<chrono::Utc>, end_date: chrono::DateTime<chrono::Utc>) -> Result<Vec<GetUserActivityWithPostsItem>, super::ErrorReadOnly> {
@@ -549,7 +547,7 @@ pub struct GetUserCountAndAvgAgeItem {
 ///
 /// Query Plan:
 /// Aggregate
-///   ->  Index Only Scan using idx_users_age on users
+///   ->  Index Only Scan using idx_users_age_updated_at on users
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT COUNT(*) as count, AVG(age) as avg_age FROM public.users"))]
 pub async fn get_user_count_and_avg_age(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<GetUserCountAndAvgAgeItem, super::ErrorReadOnly> {
     let query = sqlx::query(
@@ -569,7 +567,7 @@ pub async fn get_user_count_and_avg_age(executor: impl sqlx::Executor<'_, Databa
 ///
 /// Query Plan:
 /// Aggregate
-///   ->  Index Only Scan using idx_users_age on users
+///   ->  Index Only Scan using idx_users_age_updated_at on users
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT count(*) + count(*) AS {total!} FROM public.users"))]
 pub async fn get_non_null_count_expression(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<i64, super::ErrorReadOnly> {
     let query = sqlx::query(
@@ -592,7 +590,7 @@ pub struct GetNonNullMultiFieldsItem {
 ///
 /// Query Plan:
 /// Aggregate
-///   ->  Index Only Scan using idx_users_age on users
+///   ->  Index Only Scan using idx_users_age_updated_at on users
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n    count(*) AS {user_count!},\n    count(*) + count(*) AS {double_count!},\n    true AS {is_valid!},\n    now() AS \"current_time!\",\n    'hello' AS {greeting!}\nFROM public.users"))]
 pub async fn get_non_null_multi_fields(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<GetNonNullMultiFieldsItem, super::ErrorReadOnly> {
     let query = sqlx::query(
