@@ -12,19 +12,18 @@ pub struct SelectUsersSortedItem {
 
 #[derive(Debug, Clone)]
 pub enum SelectUsersSortedSort {
-    Asc,
-    Desc,
+    Asc {
+        page: i64,
+    },
+    Desc {
+        page: i64,
+    },
 }
 
-/// Pure choice group over users — the caller picks exactly one sort direction; the page size is shared across every branch so it becomes a single top-level argument
+/// Pure choice group over users — the caller picks exactly one sort direction; the page size is referenced in every branch so each enum variant carries its own `page` field
 ///
 /// Query Plan:
 /// === select_users_sorted (base) ===
-/// Index Scan using users_email_key on users
-///   Index Cond: ((email)::text = 'dummy'::text)
-///   Filter: ((email)::text ~~ 'dummy'::text)
-/// 
-/// === select_users_sorted (variant 1) ===
 /// Limit
 ///   ->  Sort
 ///         Sort Key: id
@@ -32,7 +31,7 @@ pub enum SelectUsersSortedSort {
 ///               Index Cond: ((email)::text = 'dummy'::text)
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 /// 
-/// === select_users_sorted (variant 2) ===
+/// === select_users_sorted (variant 1) ===
 /// Limit
 ///   ->  Sort
 ///         Sort Key: id DESC
@@ -40,13 +39,13 @@ pub enum SelectUsersSortedSort {
 ///               Index Cond: ((email)::text = 'dummy'::text)
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email\nFROM public.users\nWHERE email LIKE #{email_prefix}\n#[ORDER BY id ASC LIMIT #{page?}]\n#[ORDER BY id DESC LIMIT #{page?}]"))]
-pub async fn select_users_sorted(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, sort: SelectUsersSortedSort, page: i64) -> Result<Vec<SelectUsersSortedItem>, super::ErrorReadOnly> {
+pub async fn select_users_sorted(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, sort: SelectUsersSortedSort) -> Result<Vec<SelectUsersSortedItem>, super::ErrorReadOnly> {
     let sql: &str = match &sort {
-        SelectUsersSortedSort::Asc => r"SELECT id, name, email
+        SelectUsersSortedSort::Asc { .. } => r"SELECT id, name, email
         FROM public.users
         WHERE email LIKE $1
         ORDER BY id ASC LIMIT $2",
-        SelectUsersSortedSort::Desc => r"SELECT id, name, email
+        SelectUsersSortedSort::Desc { .. } => r"SELECT id, name, email
         FROM public.users
         WHERE email LIKE $1
         
@@ -55,13 +54,13 @@ pub async fn select_users_sorted(executor: impl sqlx::Executor<'_, Database = sq
 
     let mut query = sqlx::query(sql);
     match &sort {
-        SelectUsersSortedSort::Asc => {
+        SelectUsersSortedSort::Asc { page } => {
             query = query.bind(&email_prefix);
-            query = query.bind(&page);
+            query = query.bind(page);
         }
-        SelectUsersSortedSort::Desc => {
+        SelectUsersSortedSort::Desc { page } => {
             query = query.bind(&email_prefix);
-            query = query.bind(&page);
+            query = query.bind(page);
         }
     }
 
@@ -93,18 +92,13 @@ pub enum SelectUsersOptionalSortOrder {
 ///
 /// Query Plan:
 /// === select_users_optional_sort (base) ===
-/// Index Scan using users_email_key on users
-///   Index Cond: ((email)::text = 'dummy'::text)
-///   Filter: ((email)::text ~~ 'dummy'::text)
-/// 
-/// === select_users_optional_sort (variant 1) ===
 /// Sort
 ///   Sort Key: name
 ///   ->  Index Scan using users_email_key on users
 ///         Index Cond: ((email)::text = 'dummy'::text)
 ///         Filter: ((email)::text ~~ 'dummy'::text)
 /// 
-/// === select_users_optional_sort (variant 2) ===
+/// === select_users_optional_sort (variant 1) ===
 /// Index Scan using users_email_key on users
 ///   Index Cond: ((email)::text = 'dummy'::text)
 ///   Filter: ((email)::text ~~ 'dummy'::text)
@@ -172,40 +166,27 @@ pub enum SearchUsersMixedSort {
 ///
 /// Query Plan:
 /// === search_users_mixed (base) ===
-/// Index Scan using users_email_key on users
-///   Index Cond: ((email)::text = 'dummy'::text)
-///   Filter: ((email)::text ~~ 'dummy'::text)
-/// 
-/// === search_users_mixed (variant 1) ===
-/// Index Scan using users_email_key on users
-///   Index Cond: ((email)::text = 'dummy'::text)
-///   Filter: (((email)::text ~~ 'dummy'::text) AND (age >= 0))
-/// 
-/// === search_users_mixed (variant 2) ===
-/// Index Scan using idx_users_age on users
-///   Index Cond: (age <= 0)
-///   Filter: ((email)::text ~~ 'dummy'::text)
-/// 
-/// === search_users_mixed (variant 3) ===
 /// Limit
-///   ->  Index Scan using users_email_key on users
-///         Index Cond: ((email)::text = 'dummy'::text)
+///   ->  Index Scan using idx_users_age on users
+///         Index Cond: ((age >= 0) AND (age <= 0))
 ///         Filter: ((email)::text ~~ 'dummy'::text)
 /// 
-/// === search_users_mixed (variant 4) ===
+/// === search_users_mixed (variant 1) ===
 /// Limit
-///   ->  Sort
+///   ->  Incremental Sort
 ///         Sort Key: age, id
-///         ->  Index Scan using users_email_key on users
-///               Index Cond: ((email)::text = 'dummy'::text)
+///         Presorted Key: age
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 /// 
-/// === search_users_mixed (variant 5) ===
+/// === search_users_mixed (variant 2) ===
 /// Limit
-///   ->  Sort
+///   ->  Incremental Sort
 ///         Sort Key: age DESC, id DESC
-///         ->  Index Scan using users_email_key on users
-///               Index Cond: ((email)::text = 'dummy'::text)
+///         Presorted Key: age
+///         ->  Index Scan Backward using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE email LIKE #{email_prefix}\n  #[AND age >= #{min_age?}]\n  #[AND age <= #{max_age?}]\n#[LIMIT 100]\n#[ORDER BY age ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY age DESC, id DESC LIMIT #{limit?}]"))]
 pub async fn search_users_mixed(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, min_age: Option<i32>, max_age: Option<i32>, sort: SearchUsersMixedSort) -> Result<Vec<SearchUsersMixedItem>, super::ErrorReadOnly> {
@@ -318,45 +299,42 @@ pub enum MultiGroupSearchRange {
 
 #[derive(Debug, Clone)]
 pub enum MultiGroupSearchSort {
-    Asc,
-    Desc,
+    Asc {
+        lim: i64,
+    },
+    Desc {
+        lim: i64,
+    },
 }
 
-/// Two independent choice groups in one query. The optional `range` group selects at most one age bound (each branch carries its own per-variant field), while the required `sort` group picks a direction and shares a single `lim` argument across both of its branches
+/// Two independent choice groups in one query. The optional `range` group selects at most one age bound (each branch carries its own per-variant field), while the required `sort` group picks a direction and carries its `lim` argument as a per-variant field on both of its branches
 ///
 /// Query Plan:
 /// === multi_group_search (base) ===
-/// Index Scan using users_email_key on users
-///   Index Cond: ((email)::text = 'dummy'::text)
-///   Filter: ((email)::text ~~ 'dummy'::text)
-/// 
-/// === multi_group_search (variant 1) ===
-/// Index Scan using users_email_key on users
-///   Index Cond: ((email)::text = 'dummy'::text)
-///   Filter: (((email)::text ~~ 'dummy'::text) AND (age >= 0))
-/// 
-/// === multi_group_search (variant 2) ===
-/// Index Scan using idx_users_age on users
-///   Index Cond: (age <= 0)
-///   Filter: ((email)::text ~~ 'dummy'::text)
-/// 
-/// === multi_group_search (variant 3) ===
 /// Limit
 ///   ->  Sort
 ///         Sort Key: id
 ///         ->  Index Scan using users_email_key on users
 ///               Index Cond: ((email)::text = 'dummy'::text)
+///               Filter: (((email)::text ~~ 'dummy'::text) AND (age >= 0))
+/// 
+/// === multi_group_search (variant 1) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: id
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: (age <= 0)
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 /// 
-/// === multi_group_search (variant 4) ===
+/// === multi_group_search (variant 2) ===
 /// Limit
 ///   ->  Sort
 ///         Sort Key: id DESC
 ///         ->  Index Scan using users_email_key on users
 ///               Index Cond: ((email)::text = 'dummy'::text)
-///               Filter: ((email)::text ~~ 'dummy'::text)
+///               Filter: (((email)::text ~~ 'dummy'::text) AND (age >= 0))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE email LIKE #{email_prefix}\n  #[AND age >= #{min_age?}]\n  #[AND age <= #{max_age?}]\n#[ORDER BY id ASC LIMIT #{lim?}]\n#[ORDER BY id DESC LIMIT #{lim?}]"))]
-pub async fn multi_group_search(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, range: Option<MultiGroupSearchRange>, sort: MultiGroupSearchSort, lim: i64) -> Result<Vec<MultiGroupSearchItem>, super::ErrorReadOnly> {
+pub async fn multi_group_search(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, range: Option<MultiGroupSearchRange>, sort: MultiGroupSearchSort) -> Result<Vec<MultiGroupSearchItem>, super::ErrorReadOnly> {
     let mut final_sql = r"SELECT id, name, email, age
 FROM public.users
 WHERE email LIKE $1
@@ -368,6 +346,7 @@ WHERE email LIKE $1
 
     let mut min_age_cg: Option<&i32> = None;
     let mut max_age_cg: Option<&i32> = None;
+    let mut lim_cg: Option<&i64> = None;
     match &range {
         Some(MultiGroupSearchRange::Min { min_age }) => {
             min_age_cg = Some(min_age);
@@ -382,11 +361,13 @@ WHERE email LIKE $1
         None => {}
     }
     match &sort {
-        MultiGroupSearchSort::Asc => {
+        MultiGroupSearchSort::Asc { lim } => {
+            lim_cg = Some(lim);
             final_sql = final_sql.replace(r"#[ORDER BY id ASC LIMIT #{lim?}]", r"ORDER BY id ASC LIMIT #{lim?}");
             included_params.push("lim");
         }
-        MultiGroupSearchSort::Desc => {
+        MultiGroupSearchSort::Desc { lim } => {
+            lim_cg = Some(lim);
             final_sql = final_sql.replace(r"#[ORDER BY id DESC LIMIT #{lim?}]", r"ORDER BY id DESC LIMIT #{lim?}");
             included_params.push("lim");
         }
@@ -426,7 +407,7 @@ WHERE email LIKE $1
     }
 
     if included_params.contains(&r"lim") {
-        query = query.bind(&lim);
+        query = query.bind(lim_cg.unwrap());
     }
 
     let rows = query.fetch_all(executor).await?;
@@ -436,6 +417,412 @@ WHERE email LIKE $1
         name: row.try_get::<String, _>("name")?,
         email: row.try_get::<String, _>("email")?,
         age: row.try_get::<Option<i32>, _>("age")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct ReproCombinedCursorSortItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub age: Option<i32>,
+    pub is_active: Option<bool>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReproCombinedCursorSortArchived {
+    Active,
+    Inactive,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReproCombinedCursorSortSort {
+    UaAsc {
+        cur_ua_asc_ts: chrono::DateTime<chrono::Utc>,
+        cur_ua_asc_id: i32,
+    },
+    UaDesc {
+        cur_ua_desc_ts: chrono::DateTime<chrono::Utc>,
+        cur_ua_desc_id: i32,
+    },
+    NameAsc {
+        cur_name_asc_val: String,
+        cur_name_asc_id: i32,
+    },
+    NameDesc {
+        cur_name_desc_val: String,
+        cur_name_desc_id: i32,
+    },
+}
+
+/// Reproducer combining an optional `archived` choice group (mutually exclusive is_active branches), several additive optional filter blocks (UNNEST membership, name/date filters, jsonb social-links EXISTS), and an optional keyset-cursor `sort` choice group with four ORDER BY variants. No single statement can include every branch, so this exercises the group-aware type extraction (all additive blocks always included plus one variant per group)
+///
+/// Query Plan:
+/// === repro_combined_cursor_sort (base) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: users.updated_at, users.id
+///         Presorted Key: users.updated_at
+///         ->  Nested Loop Semi Join
+///               Join Filter: ((users.email)::text = unnest.unnest_1)
+///               ->  Index Scan using idx_users_updated_at on users
+///                     Index Cond: ((updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone))
+///                     Filter: ((is_active IS TRUE) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND ((name)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND EXISTS(SubPlan 1))
+///                     SubPlan 1
+///                       ->  Function Scan on jsonb_array_elements sl
+///                             Filter: ((value ->> 'platform'::text) = ANY ('{}'::text[]))
+///               ->  Function Scan on unnest
+///                     Filter: (unnest = 'dummy'::text)
+/// 
+/// === repro_combined_cursor_sort (variant 1) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: users.updated_at, users.id
+///         Presorted Key: users.updated_at
+///         ->  Nested Loop Semi Join
+///               Join Filter: ((users.email)::text = unnest.unnest_1)
+///               ->  Index Scan using idx_users_updated_at on users
+///                     Index Cond: ((updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone))
+///                     Filter: ((is_active IS FALSE) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND ((name)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND EXISTS(SubPlan 1))
+///                     SubPlan 1
+///                       ->  Function Scan on jsonb_array_elements sl
+///                             Filter: ((value ->> 'platform'::text) = ANY ('{}'::text[]))
+///               ->  Function Scan on unnest
+///                     Filter: (unnest = 'dummy'::text)
+/// 
+/// === repro_combined_cursor_sort (variant 2) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: users.updated_at DESC, users.id DESC
+///         Presorted Key: users.updated_at
+///         ->  Nested Loop Semi Join
+///               Join Filter: ((users.email)::text = unnest.unnest_1)
+///               ->  Index Scan Backward using idx_users_updated_at on users
+///                     Index Cond: ((updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone))
+///                     Filter: ((is_active IS TRUE) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND ((name)::text = 'dummy'::text) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND EXISTS(SubPlan 1))
+///                     SubPlan 1
+///                       ->  Function Scan on jsonb_array_elements sl
+///                             Filter: ((value ->> 'platform'::text) = ANY ('{}'::text[]))
+///               ->  Function Scan on unnest
+///                     Filter: (unnest = 'dummy'::text)
+/// 
+/// === repro_combined_cursor_sort (variant 3) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: users.id
+///         ->  Nested Loop Semi Join
+///               Join Filter: ((users.email)::text = unnest.unnest_1)
+///               ->  Index Scan using idx_users_updated_at on users
+///                     Index Cond: ((updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone))
+///                     Filter: ((is_active IS TRUE) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND ((name)::text = 'dummy'::text) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND EXISTS(SubPlan 1))
+///                     SubPlan 1
+///                       ->  Function Scan on jsonb_array_elements sl
+///                             Filter: ((value ->> 'platform'::text) = ANY ('{}'::text[]))
+///               ->  Function Scan on unnest
+///                     Filter: (unnest = 'dummy'::text)
+/// 
+/// === repro_combined_cursor_sort (variant 4) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: users.id DESC
+///         ->  Nested Loop Semi Join
+///               Join Filter: ((users.email)::text = unnest.unnest_1)
+///               ->  Index Scan using idx_users_updated_at on users
+///                     Index Cond: ((updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone))
+///                     Filter: ((is_active IS TRUE) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND ((name)::text = 'dummy'::text) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)) AND EXISTS(SubPlan 1))
+///                     SubPlan 1
+///                       ->  Function Scan on jsonb_array_elements sl
+///                             Filter: ((value ->> 'platform'::text) = ANY ('{}'::text[]))
+///               ->  Function Scan on unnest
+///                     Filter: (unnest = 'dummy'::text)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE id >= #{min_id}\n  #[AND is_active IS TRUE]\n  #[AND is_active IS FALSE]\n  #[AND (name, email) IN (\n      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])\n  )]\n  #[AND name = #{name_exact?}]\n  #[AND name LIKE #{name_starts_with?}]\n  #[AND updated_at >= #{updated_from?}]\n  #[AND updated_at <= #{updated_to?}]\n  #[AND EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(profile->'social_links') AS sl\n      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])\n  )]\n  #[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]\n  #[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]\n  #[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]\n  #[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
+pub async fn repro_combined_cursor_sort(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_id: i32, req_names: Option<Vec<String>>, req_emails: Option<Vec<String>>, name_exact: Option<String>, name_starts_with: Option<String>, updated_from: Option<chrono::DateTime<chrono::Utc>>, updated_to: Option<chrono::DateTime<chrono::Utc>>, platforms: Option<Vec<String>>, lim: i64, archived: Option<ReproCombinedCursorSortArchived>, sort: Option<ReproCombinedCursorSortSort>) -> Result<Vec<ReproCombinedCursorSortItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
+FROM public.users
+WHERE id >= $1
+  #[AND is_active IS TRUE]
+  #[AND is_active IS FALSE]
+  #[AND (name, email) IN (
+      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
+  )]
+  #[AND name = #{name_exact?}]
+  #[AND name LIKE #{name_starts_with?}]
+  #[AND updated_at >= #{updated_from?}]
+  #[AND updated_at <= #{updated_to?}]
+  #[AND EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(profile->'social_links') AS sl
+      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
+  )]
+  #[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]
+  #[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]
+  #[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]
+  #[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]
+LIMIT $2;".to_string();
+    let mut included_params = Vec::new();
+
+    if req_names.is_some() {
+        final_sql = final_sql.replace(r"#[AND (name, email) IN (
+      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
+  )]", r"AND (name, email) IN (
+      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
+  )");
+        included_params.push("req_names");
+        included_params.push("req_emails");
+    } else {
+        final_sql = final_sql.replace(r"#[AND (name, email) IN (
+      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
+  )]", "");
+    }
+
+    if name_exact.is_some() {
+        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", r"AND name = #{name_exact?}");
+        included_params.push("name_exact");
+    } else {
+        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", "");
+    }
+
+    if name_starts_with.is_some() {
+        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", r"AND name LIKE #{name_starts_with?}");
+        included_params.push("name_starts_with");
+    } else {
+        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", "");
+    }
+
+    if updated_from.is_some() {
+        final_sql = final_sql.replace(r"#[AND updated_at >= #{updated_from?}]", r"AND updated_at >= #{updated_from?}");
+        included_params.push("updated_from");
+    } else {
+        final_sql = final_sql.replace(r"#[AND updated_at >= #{updated_from?}]", "");
+    }
+
+    if updated_to.is_some() {
+        final_sql = final_sql.replace(r"#[AND updated_at <= #{updated_to?}]", r"AND updated_at <= #{updated_to?}");
+        included_params.push("updated_to");
+    } else {
+        final_sql = final_sql.replace(r"#[AND updated_at <= #{updated_to?}]", "");
+    }
+
+    if platforms.is_some() {
+        final_sql = final_sql.replace(r"#[AND EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(profile->'social_links') AS sl
+      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
+  )]", r"AND EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(profile->'social_links') AS sl
+      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
+  )");
+        included_params.push("platforms");
+    } else {
+        final_sql = final_sql.replace(r"#[AND EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(profile->'social_links') AS sl
+      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
+  )]", "");
+    }
+
+    let mut cur_ua_asc_ts_cg: Option<&chrono::DateTime<chrono::Utc>> = None;
+    let mut cur_ua_asc_id_cg: Option<&i32> = None;
+    let mut cur_ua_desc_ts_cg: Option<&chrono::DateTime<chrono::Utc>> = None;
+    let mut cur_ua_desc_id_cg: Option<&i32> = None;
+    let mut cur_name_asc_val_cg: Option<&String> = None;
+    let mut cur_name_asc_id_cg: Option<&i32> = None;
+    let mut cur_name_desc_val_cg: Option<&String> = None;
+    let mut cur_name_desc_id_cg: Option<&i32> = None;
+    match &archived {
+        Some(ReproCombinedCursorSortArchived::Active) => {
+            final_sql = final_sql.replace(r"#[AND is_active IS TRUE]", r"AND is_active IS TRUE");
+        }
+        Some(ReproCombinedCursorSortArchived::Inactive) => {
+            final_sql = final_sql.replace(r"#[AND is_active IS FALSE]", r"AND is_active IS FALSE");
+        }
+        None => {}
+    }
+    match &sort {
+        Some(ReproCombinedCursorSortSort::UaAsc { cur_ua_asc_ts, cur_ua_asc_id }) => {
+            cur_ua_asc_ts_cg = Some(cur_ua_asc_ts);
+            cur_ua_asc_id_cg = Some(cur_ua_asc_id);
+            final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]", r"AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC");
+            included_params.push("cur_ua_asc_ts");
+            included_params.push("cur_ua_asc_id");
+        }
+        Some(ReproCombinedCursorSortSort::UaDesc { cur_ua_desc_ts, cur_ua_desc_id }) => {
+            cur_ua_desc_ts_cg = Some(cur_ua_desc_ts);
+            cur_ua_desc_id_cg = Some(cur_ua_desc_id);
+            final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]", r"AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC");
+            included_params.push("cur_ua_desc_ts");
+            included_params.push("cur_ua_desc_id");
+        }
+        Some(ReproCombinedCursorSortSort::NameAsc { cur_name_asc_val, cur_name_asc_id }) => {
+            cur_name_asc_val_cg = Some(cur_name_asc_val);
+            cur_name_asc_id_cg = Some(cur_name_asc_id);
+            final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]", r"AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC");
+            included_params.push("cur_name_asc_val");
+            included_params.push("cur_name_asc_id");
+        }
+        Some(ReproCombinedCursorSortSort::NameDesc { cur_name_desc_val, cur_name_desc_id }) => {
+            cur_name_desc_val_cg = Some(cur_name_desc_val);
+            cur_name_desc_id_cg = Some(cur_name_desc_id);
+            final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]", r"AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC");
+            included_params.push("cur_name_desc_val");
+            included_params.push("cur_name_desc_id");
+        }
+        None => {}
+    }
+    final_sql = final_sql.replace(r"#[AND is_active IS TRUE]", "");
+    final_sql = final_sql.replace(r"#[AND is_active IS FALSE]", "");
+    final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]", "");
+    final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]", "");
+    final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]", "");
+    final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{min_id}", &format!("${}", param_counter));
+    param_counter += 1;
+    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
+    param_counter += 1;
+    if included_params.contains(&r"req_names") {
+        final_sql = final_sql.replace(r"#{req_names?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"req_emails") {
+        final_sql = final_sql.replace(r"#{req_emails?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"name_exact") {
+        final_sql = final_sql.replace(r"#{name_exact?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"name_starts_with") {
+        final_sql = final_sql.replace(r"#{name_starts_with?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"updated_from") {
+        final_sql = final_sql.replace(r"#{updated_from?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"updated_to") {
+        final_sql = final_sql.replace(r"#{updated_to?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"platforms") {
+        final_sql = final_sql.replace(r"#{platforms?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_ua_asc_ts") {
+        final_sql = final_sql.replace(r"#{cur_ua_asc_ts}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_ua_asc_id") {
+        final_sql = final_sql.replace(r"#{cur_ua_asc_id}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_ua_desc_ts") {
+        final_sql = final_sql.replace(r"#{cur_ua_desc_ts}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_ua_desc_id") {
+        final_sql = final_sql.replace(r"#{cur_ua_desc_id}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_name_asc_val") {
+        final_sql = final_sql.replace(r"#{cur_name_asc_val}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_name_asc_id") {
+        final_sql = final_sql.replace(r"#{cur_name_asc_id}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_name_desc_val") {
+        final_sql = final_sql.replace(r"#{cur_name_desc_val}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_name_desc_id") {
+        final_sql = final_sql.replace(r"#{cur_name_desc_id}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&min_id);
+    query = query.bind(&lim);
+    if included_params.contains(&r"req_names") {
+        query = query.bind(req_names.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"req_emails") {
+        query = query.bind(req_emails.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"name_exact") {
+        query = query.bind(name_exact.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"name_starts_with") {
+        query = query.bind(name_starts_with.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"updated_from") {
+        query = query.bind(updated_from.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"updated_to") {
+        query = query.bind(updated_to.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"platforms") {
+        query = query.bind(platforms.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cur_ua_asc_ts") {
+        query = query.bind(cur_ua_asc_ts_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_ua_asc_id") {
+        query = query.bind(cur_ua_asc_id_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_ua_desc_ts") {
+        query = query.bind(cur_ua_desc_ts_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_ua_desc_id") {
+        query = query.bind(cur_ua_desc_id_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_name_asc_val") {
+        query = query.bind(cur_name_asc_val_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_name_asc_id") {
+        query = query.bind(cur_name_asc_id_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_name_desc_val") {
+        query = query.bind(cur_name_desc_val_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_name_desc_id") {
+        query = query.bind(cur_name_desc_id_cg.unwrap());
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(ReproCombinedCursorSortItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
+        age: row.try_get::<Option<i32>, _>("age")?,
+        is_active: row.try_get::<Option<bool>, _>("is_active")?,
+        created_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at")?,
+        updated_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")?,
     })
     }).collect();
     result.map_err(Into::into)

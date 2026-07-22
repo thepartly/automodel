@@ -141,9 +141,9 @@ VALUES (
         -- bpchar_col
         '\xDEADBEEF'::bytea,
         -- bytea_col
-        B '10101010',
+        B'10101010',
         -- bit_col
-        B '1100110011001100',
+        B'1100110011001100',
         -- varbit_col
         '2025-11-20',
         -- date_col

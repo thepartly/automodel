@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use tokio_postgres::types::{Kind as PgKind, Type as PgType};
 use tokio_postgres::Statement;
@@ -110,6 +110,7 @@ pub fn strip_non_null_column_casts(sql: &str) -> (String, HashSet<String>) {
     (result, non_null_columns)
 }
 
+use crate::query_definition::ChoiceGroup;
 use crate::rust_type::{InputParam, OutputColumn, RustName, StructField};
 use crate::utils::to_snake_case;
 
@@ -165,101 +166,33 @@ pub struct ParsedSql {
     pub all_parameters: Vec<String>,
 }
 
-/// Extract type information from a prepared SQL statement
+/// Extract type information from a prepared SQL statement.
+///
+/// Iterates the pre-computed `explain_variants` — a set of *valid* queries where
+/// every ungrouped (additive) conditional block is always included and exactly
+/// one branch is chosen from each choice group (varying a single group at a
+/// time). For a query with no choice groups this is a single fully-combined
+/// query. Each variant is prepared on its own; parameter types are collected by
+/// name across all variants and re-ordered to match the parameters' source order
+/// in the original SQL, so downstream codegen — which indexes `input_types`
+/// positionally against the original SQL — keeps working unchanged.
 pub async fn extract_query_types(
     client: &tokio_postgres::Client,
     sql: &str,
-    sql_variants: &[(String, Vec<String>, String)],
+    explain_variants: &[(String, Vec<String>, String)],
     field_type_mappings: Option<&HashMap<String, String>>,
 ) -> Result<QueryTypeInfo> {
     // Strip non-null column cast syntax: {col!} and "col!" → clean col names.
     // The non_null_columns set is used later to override nullability on output columns.
     let (clean_sql, non_null_columns) = strip_non_null_column_casts(sql);
 
-    // Parse SQL to handle conditional blocks
+    // Parse SQL to handle conditional blocks (needed by codegen via `parsed_sql`).
     let parsed_sql = parse_sql_with_conditionals(&clean_sql);
-
-    // For validation, create SQL with all conditional blocks included
-    let full_sql = reconstruct_full_sql(&parsed_sql);
-
-    // Convert named parameters to positional parameters for PostgreSQL
-    let (converted_sql, param_names) = convert_named_params_to_positional(&full_sql);
-
     let has_conditionals = !parsed_sql.conditional_blocks.is_empty();
 
-    // Fast path: prepare the fully-combined SQL (all conditional blocks included
-    // at once). This works whenever the blocks are additive — e.g. multiple `AND`
-    // predicates in a WHERE clause or multiple `SET` assignments in an UPDATE.
-    match client.prepare(&converted_sql).await {
-        Ok(statement) => {
-            let input_types = extract_input_types(&statement, &param_names, field_type_mappings)?;
-            let output_types =
-                extract_output_types(&client, &statement, field_type_mappings, &non_null_columns)
-                    .await?;
-
-            Ok(QueryTypeInfo {
-                input_types,
-                output_types,
-                parsed_sql: if has_conditionals {
-                    Some(parsed_sql)
-                } else {
-                    None
-                },
-                statements: vec![statement],
-            })
-        }
-        Err(combined_err) if has_conditionals => {
-            // The combined SQL is invalid because some conditional blocks are
-            // mutually exclusive (e.g. alternative `ORDER BY ... LIMIT` branches
-            // used for keyset pagination). Prepare each variant separately and
-            // merge the extracted parameter/output types.
-            extract_query_types_per_variant(
-                client,
-                sql_variants,
-                &clean_sql,
-                parsed_sql,
-                &non_null_columns,
-                field_type_mappings,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to prepare statement for type extraction (combined SQL was also \
-                     invalid: {}): {}",
-                    combined_err, converted_sql
-                )
-            })
-        }
-        Err(combined_err) => Err(combined_err).with_context(|| {
-            format!(
-                "Failed to prepare statement for type extraction: {}",
-                converted_sql
-            )
-        }),
-    }
-}
-
-/// Fallback type extraction for queries whose conditional blocks are mutually
-/// exclusive and therefore cannot be combined into a single valid statement.
-///
-/// Reuses the per-variant SQL already computed at parse time (`sql_variants`) —
-/// the same base + one-block-per-variant set that the EXPLAIN / performance
-/// analysis prepares — so no variant SQL is regenerated here. Each variant is
-/// prepared on its own; parameter types are collected by name across all
-/// variants and then re-ordered to match the parameters' source order in the
-/// original SQL, so downstream codegen — which indexes `input_types`
-/// positionally against the original SQL — keeps working unchanged.
-async fn extract_query_types_per_variant(
-    client: &tokio_postgres::Client,
-    sql_variants: &[(String, Vec<String>, String)],
-    clean_sql: &str,
-    parsed_sql: ParsedSql,
-    non_null_columns: &HashSet<String>,
-    field_type_mappings: Option<&HashMap<String, String>>,
-) -> Result<QueryTypeInfo> {
     // Canonical source order of every parameter (suffixes preserved). Downstream
     // codegen expects `input_types` to line up with this ordering.
-    let ordered_param_names = parse_parameter_names_from_sql(clean_sql);
+    let ordered_param_names = parse_parameter_names_from_sql(&clean_sql);
 
     let mut param_types: HashMap<String, InputParam> = HashMap::new();
     let mut output_types: Vec<OutputColumn> = Vec::new();
@@ -267,15 +200,11 @@ async fn extract_query_types_per_variant(
     let mut statements: Vec<Statement> = Vec::new();
     let mut last_err: Option<anyhow::Error> = None;
 
-    // `sql_variants` is already positional SQL with matching parameter names
-    // (base variant first, then each conditional block in isolation).
-    for (converted, names, _label) in sql_variants {
+    for (converted, names, _label) in explain_variants {
         let statement = match client.prepare(converted).await {
             Ok(s) => s,
             Err(e) => {
-                // A single mutually-exclusive branch may still be invalid on its
-                // own; remember the error but keep trying other variants.
-                last_err = Some(anyhow::anyhow!("{}", e));
+                last_err = Some(anyhow::anyhow!("{}: {}", e, converted));
                 continue;
             }
         };
@@ -287,7 +216,7 @@ async fn extract_query_types_per_variant(
 
         if !have_output {
             let outputs =
-                extract_output_types(&client, &statement, field_type_mappings, non_null_columns)
+                extract_output_types(client, &statement, field_type_mappings, &non_null_columns)
                     .await?;
             if !outputs.is_empty() {
                 output_types = outputs;
@@ -299,9 +228,9 @@ async fn extract_query_types_per_variant(
     }
 
     if statements.is_empty() {
-        return Err(last_err.unwrap_or_else(|| {
-            anyhow::anyhow!("No query variant could be prepared for type extraction")
-        }));
+        return Err(last_err
+            .unwrap_or_else(|| anyhow::anyhow!("No query variant could be prepared"))
+            .context("Failed to prepare any statement for type extraction"));
     }
 
     // Re-assemble input types in the original source order.
@@ -315,9 +244,107 @@ async fn extract_query_types_per_variant(
     Ok(QueryTypeInfo {
         input_types,
         output_types,
-        parsed_sql: Some(parsed_sql),
+        parsed_sql: if has_conditionals {
+            Some(parsed_sql)
+        } else {
+            None
+        },
         statements,
     })
+}
+
+/// Generate the set of *valid* query variants used for EXPLAIN validation and
+/// type extraction.
+///
+/// Every additive (ungrouped) conditional block is always included; for each
+/// choice group exactly one branch is chosen, varying a single group at a time
+/// while holding every other group at its first branch. This keeps the number of
+/// variants linear while still exercising every grouped parameter at least once.
+/// For a query with no choice groups this yields a single variant with all
+/// conditional blocks combined. Each entry is
+/// `(positional_sql, ordered_param_names, label)`.
+pub(crate) fn generate_explain_variants(
+    sql: &str,
+    choice_groups: &[ChoiceGroup],
+) -> Vec<(String, Vec<String>, String)> {
+    // Match how `sql_variants` are built at parse time: strip non-null casts,
+    // then convert to positional parameters (done per-selection below).
+    let (clean_sql, _) = strip_non_null_column_casts(sql);
+    let parsed_sql = parse_sql_with_conditionals(&clean_sql);
+    let block_count = parsed_sql.conditional_blocks.len();
+
+    // Block indices owned by some choice group; every other block is additive.
+    let grouped_indices: HashSet<usize> = choice_groups
+        .iter()
+        .flat_map(|g| g.variants.iter().map(|v| v.block_index))
+        .collect();
+    let additive: Vec<usize> = (0..block_count)
+        .filter(|i| !grouped_indices.contains(i))
+        .collect();
+
+    // Default branch per group = its first variant's block index.
+    let default_choice: Vec<usize> = choice_groups
+        .iter()
+        .filter_map(|g| g.variants.first().map(|v| v.block_index))
+        .collect();
+
+    // One selection per (group, variant): vary that group's branch while holding
+    // all others at their default branch. Deduplicate identical selections.
+    let mut selections: Vec<Vec<usize>> = Vec::new();
+    let mut seen: HashSet<Vec<usize>> = HashSet::new();
+    for (gi, group) in choice_groups.iter().enumerate() {
+        for variant in &group.variants {
+            let mut chosen = default_choice.clone();
+            if let Some(slot) = chosen.get_mut(gi) {
+                *slot = variant.block_index;
+            }
+            let mut included: Vec<usize> = additive.clone();
+            included.extend(chosen.iter().copied());
+            included.sort_unstable();
+            included.dedup();
+            if seen.insert(included.clone()) {
+                selections.push(included);
+            }
+        }
+    }
+    // No choice groups (or none with variants): a single all-additive selection.
+    if selections.is_empty() {
+        let mut included = additive.clone();
+        included.sort_unstable();
+        selections.push(included);
+    }
+
+    selections
+        .into_iter()
+        .enumerate()
+        .map(|(i, included)| {
+            let set: HashSet<usize> = included.into_iter().collect();
+            let (converted, names) = build_selected_sql(&parsed_sql, &set);
+            let label = if i == 0 {
+                "base".to_string()
+            } else {
+                format!("variant {}", i)
+            };
+            (converted, names, label)
+        })
+        .collect()
+}
+
+/// Build a positional SQL string that includes only the given conditional block
+/// indices (each such block's `#[...]` marker replaced by its inner content) and
+/// removes all others, then converts remaining `#{param}` placeholders to `$N`.
+/// Returns the positional SQL and the ordered parameter names (with suffixes).
+fn build_selected_sql(parsed_sql: &ParsedSql, included: &HashSet<usize>) -> (String, Vec<String>) {
+    let mut sql = parsed_sql.base_sql.clone();
+    for (i, block) in parsed_sql.conditional_blocks.iter().enumerate() {
+        let marker = format!("#[{}]", block.sql_content);
+        if included.contains(&i) {
+            sql = sql.replace(&marker, &block.sql_content);
+        } else {
+            sql = sql.replace(&marker, "");
+        }
+    }
+    convert_named_params_to_positional(&sql)
 }
 
 /// Extract constraint information from tables involved in a prepared statement
@@ -1012,19 +1039,6 @@ pub fn parse_sql_with_conditionals(sql: &str) -> ParsedSql {
         } else {
             result.base_sql.push(ch);
         }
-    }
-
-    result
-}
-
-/// Reconstruct full SQL with all conditional blocks included for validation
-fn reconstruct_full_sql(parsed_sql: &ParsedSql) -> String {
-    let mut result = parsed_sql.base_sql.clone();
-
-    // Replace conditional blocks #[...] with their inner content
-    for block in &parsed_sql.conditional_blocks {
-        let conditional_block = format!("#[{}]", block.sql_content);
-        result = result.replace(&conditional_block, &block.sql_content);
     }
 
     result

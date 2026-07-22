@@ -33,8 +33,8 @@ async fn seed(pool: &sqlx::PgPool) -> (String, Vec<generated::users::InsertUserI
 }
 
 /// Pure required choice group: the caller must pick exactly one sort direction,
-/// and `page` is shared across every branch so it is a single top-level `i64`
-/// argument (the enum variants are plain units).
+/// and `page` is referenced in every branch so each enum variant carries its own
+/// `page` field.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pure_choice_group_with_shared_page() {
     let pool = common::get_pool().await;
@@ -44,20 +44,22 @@ async fn pure_choice_group_with_shared_page() {
     let asc = generated::choice_groups::select_users_sorted(
         pool,
         prefix.clone(),
-        SelectUsersSortedSort::Asc,
-        2,
+        SelectUsersSortedSort::Asc { page: 2 },
     )
     .await
     .expect("asc select failed");
-    assert_eq!(asc.len(), 2, "shared page should cap at 2 rows");
+    assert_eq!(asc.len(), 2, "page field should cap at 2 rows");
     assert_eq!(asc[0].id, rows[0].id);
     assert_eq!(asc[1].id, rows[1].id);
 
     // Descending by id (c, b, a); page caps at 2.
-    let desc =
-        generated::choice_groups::select_users_sorted(pool, prefix, SelectUsersSortedSort::Desc, 2)
-            .await
-            .expect("desc select failed");
+    let desc = generated::choice_groups::select_users_sorted(
+        pool,
+        prefix,
+        SelectUsersSortedSort::Desc { page: 2 },
+    )
+    .await
+    .expect("desc select failed");
     assert_eq!(desc.len(), 2);
     assert_eq!(desc[0].id, rows[2].id);
     assert_eq!(desc[1].id, rows[1].id);
@@ -142,7 +144,8 @@ async fn mixed_additive_filters_and_choice_group() {
 
 /// Two independent choice groups in a single query: an optional `range` group
 /// (per-variant field on each branch) and a required `sort` group whose `lim`
-/// argument is shared across both branches. Each group compiles to its own enum
+/// argument is carried as a per-variant field in both branches. Each group
+/// compiles to its own enum
 /// argument and the two selectors are chosen independently.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_independent_choice_groups() {
@@ -154,12 +157,11 @@ async fn two_independent_choice_groups() {
         pool,
         prefix.clone(),
         None,
-        MultiGroupSearchSort::Asc,
-        2,
+        MultiGroupSearchSort::Asc { lim: 2 },
     )
     .await
     .expect("none/asc select failed");
-    assert_eq!(none_asc.len(), 2, "shared lim should cap at 2 rows");
+    assert_eq!(none_asc.len(), 2, "lim field should cap at 2 rows");
     assert_eq!(none_asc[0].id, rows[0].id);
     assert_eq!(none_asc[1].id, rows[1].id);
 
@@ -168,8 +170,7 @@ async fn two_independent_choice_groups() {
         pool,
         prefix.clone(),
         Some(MultiGroupSearchRange::Min { min_age: 22 }),
-        MultiGroupSearchSort::Asc,
-        10,
+        MultiGroupSearchSort::Asc { lim: 10 },
     )
     .await
     .expect("min/asc select failed");
@@ -182,8 +183,7 @@ async fn two_independent_choice_groups() {
         pool,
         prefix,
         Some(MultiGroupSearchRange::Max { max_age: 22 }),
-        MultiGroupSearchSort::Desc,
-        10,
+        MultiGroupSearchSort::Desc { lim: 10 },
     )
     .await
     .expect("max/desc select failed");

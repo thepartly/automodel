@@ -20,7 +20,7 @@ WHERE id >= #{min_id}
   #[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]
   #[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]
   #[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]
--- === Sort mode (exactly one active; selected by the `sort` enum, shared `limit`) ===
+-- === Sort mode (exactly one active; selected by the `sort` enum, per-variant `limit`) ===
 -- No sort: return any N rows, no cursor support.
 #[#{sort=unsorted!} LIMIT 100]
 -- Sorted modes (keyset pagination via the compound cursor above):

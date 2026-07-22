@@ -5,9 +5,9 @@ use example_app::generated::users::GetUsersMultiSortCursorSort;
 
 /// Regression test for mutually-exclusive sort modes expressed as a choice group.
 /// The four `ORDER BY ... LIMIT` branches are tagged `#{sort=<variant>!}`, so the
-/// generated function takes a single `GetUsersMultiSortCursorSort` enum argument
-/// plus the shared `page_size`; the keyset cursor params live inside the relevant
-/// enum variants. This verifies each sort mode selects and orders correctly and
+/// generated function takes a single `GetUsersMultiSortCursorSort` enum argument;
+/// each branch carries its own `page_size` (and, where relevant, the keyset
+/// cursor params). This verifies each sort mode selects and orders correctly and
 /// that picking a mode is the only way to call the function.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_multi_sort_mode_selection() {
@@ -23,8 +23,8 @@ async fn test_multi_sort_mode_selection() {
         GetUsersMultiSortCursorSort::UaAsc {
             cursor_ts: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
             cursor_id: 0,
+            page_size: 3,
         },
-        3,
     )
     .await
     .expect("updated_at ASC mode should succeed");
@@ -36,11 +36,10 @@ async fn test_multi_sort_mode_selection() {
         );
     }
 
-    // Mode: name DESC (a unit variant — no cursor fields required).
+    // Mode: name DESC (no cursor fields required, just the per-branch page size).
     let name_desc = generated::users::get_users_multi_sort_cursor(
         pool,
-        GetUsersMultiSortCursorSort::NameDesc,
-        3,
+        GetUsersMultiSortCursorSort::NameDesc { page_size: 3 },
     )
     .await
     .expect("name DESC mode should succeed");
@@ -56,8 +55,8 @@ async fn test_multi_sort_mode_selection() {
             GetUsersMultiSortCursorSort::UaDesc {
                 cursor_ts: first.updated_at.unwrap(),
                 cursor_id: first.id,
+                page_size: 5,
             },
-            5,
         )
         .await
         .expect("updated_at DESC mode with cursor should succeed");

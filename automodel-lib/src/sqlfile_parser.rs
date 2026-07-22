@@ -572,6 +572,38 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
+/// Auto-quote a single-line `description:` value in the metadata YAML so free
+/// text can contain YAML-significant characters (notably `": "`, which would
+/// otherwise be read as a nested mapping and abort parsing).
+///
+/// Only a plain (unquoted, non-block) single-line value is rewritten; values
+/// that are already quoted (`"`/`'`) or block scalars (`|`/`>`) are left
+/// untouched, as is a `description:` with no inline value.
+fn quote_plain_description(yaml: &str) -> String {
+    yaml.lines()
+        .map(|line| quote_plain_description_line(line).unwrap_or_else(|| line.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn quote_plain_description_line(line: &str) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, rest) = line.split_at(indent_len);
+    let value = rest.strip_prefix("description:")?;
+    let value = value.trim();
+    // Empty (multi-line form) or already quoted / a block scalar: leave as-is.
+    if value.is_empty()
+        || value.starts_with('"')
+        || value.starts_with('\'')
+        || value.starts_with('|')
+        || value.starts_with('>')
+    {
+        return None;
+    }
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(format!("{indent}description: \"{escaped}\""))
+}
+
 /// Parse SQL file with embedded YAML metadata in comments
 /// Expected format:
 /// ```sql
@@ -629,8 +661,11 @@ async fn parse_sql_file(
         }
     }
 
-    // Parse the YAML metadata
-    let yaml_str = yaml_lines.join("\n");
+    // Parse the YAML metadata. Free-text `description` values routinely contain
+    // characters that are illegal in an unquoted YAML plain scalar (most
+    // commonly `": "`, but also leading indicators like `#`), so auto-quote a
+    // single-line description before handing the document to serde.
+    let yaml_str = quote_plain_description(&yaml_lines.join("\n"));
 
     // Create a temporary QueryDefinition with minimal info
     #[derive(Default, serde::Deserialize)]
@@ -724,10 +759,15 @@ async fn parse_sql_file(
         })
         .collect();
 
+    // Group-aware valid variants used for EXPLAIN validation and type extraction:
+    // every ungrouped block always included plus one branch per choice group.
+    let explain_variants = crate::types_extractor::generate_explain_variants(&sql, &choice_groups);
+
     Ok(QueryDefinition {
         name: name.to_string(),
         sql,
         sql_variants,
+        explain_variants,
         description: metadata.description,
         module: module.to_string(),
         expect: metadata.expect.unwrap_or_default(),
@@ -921,6 +961,49 @@ mod choice_group_tests {
         let sql = include_str!("../tests/fixtures/choice_groups/invalid_duplicate_variant.sql");
         let err = extract_choice_groups(sql).unwrap_err().to_string();
         assert!(err.contains("duplicate variant"), "{}", err);
+    }
+}
+
+#[cfg(test)]
+mod description_quoting_tests {
+    use super::*;
+
+    #[test]
+    fn quotes_plain_description_with_colon() {
+        let yaml = "description: picks one mode: fast or slow\nexpect: multiple";
+        let quoted = quote_plain_description(yaml);
+        let value: serde_yaml::Value = serde_yaml::from_str(&quoted).unwrap();
+        assert_eq!(value["description"], "picks one mode: fast or slow");
+        assert_eq!(value["expect"], "multiple");
+    }
+
+    #[test]
+    fn escapes_embedded_quotes_and_backslashes() {
+        let yaml = r#"description: says "hi" with a \ slash"#;
+        let quoted = quote_plain_description(yaml);
+        let value: serde_yaml::Value = serde_yaml::from_str(&quoted).unwrap();
+        assert_eq!(value["description"], r#"says "hi" with a \ slash"#);
+    }
+
+    #[test]
+    fn preserves_indentation() {
+        let yaml = "  description: a: b";
+        let quoted = quote_plain_description(yaml);
+        assert_eq!(quoted, "  description: \"a: b\"");
+    }
+
+    #[test]
+    fn leaves_already_quoted_and_block_scalars_untouched() {
+        for value in ["\"already\"", "'already'", "|", ">"] {
+            let yaml = format!("description: {value}");
+            assert_eq!(quote_plain_description(&yaml), yaml);
+        }
+    }
+
+    #[test]
+    fn ignores_non_description_keys() {
+        let yaml = "return_type: SomeRow\nexpect: multiple";
+        assert_eq!(quote_plain_description(yaml), yaml);
     }
 }
 

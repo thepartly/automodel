@@ -116,7 +116,19 @@ pub(crate) struct QueryDefinition {
     /// Each variant represents: (converted_sql, param_names, variant_label)
     /// - Base variant has all conditional blocks removed
     /// - Additional variants include each conditional block separately
+    ///
+    /// These preserve the positional contract used by codegen: index 0 is the
+    /// base variant and index `block_index + 1` is that single block in
+    /// isolation. They are NOT used for EXPLAIN or type extraction (see
+    /// `explain_variants`).
     pub sql_variants: Vec<(String, Vec<String>, String)>,
+    /// Pre-processed *valid* SQL variants used for EXPLAIN validation and type
+    /// extraction. Each variant always includes every ungrouped (additive)
+    /// conditional block and exactly one branch from each choice group (varying a
+    /// single group at a time). For a query with no choice groups this is a single
+    /// variant with all conditional blocks combined. Each entry is
+    /// (converted_sql, param_names, variant_label).
+    pub explain_variants: Vec<(String, Vec<String>, String)>,
     /// Optional description of what the query does
     pub description: Option<String>,
     /// Module name where this function should be generated

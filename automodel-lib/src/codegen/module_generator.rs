@@ -4,7 +4,7 @@ use crate::codegen::types_generator::{
     generate_result_struct_with_name, generate_return_type, generate_structured_params_signature,
     generate_structured_params_struct, strip_input_suffix,
 };
-use crate::query_definition::{ChoiceGroup, ChoiceVariant};
+use crate::query_definition::ChoiceVariant;
 use crate::query_definition::{ExpectedResult, QueryDefinition, TelemetryLevel};
 use crate::query_definition_rt::QueryDefinitionRuntime;
 use crate::rust_type::{InputParam, OutputColumn};
@@ -659,7 +659,7 @@ pub fn generate_function_code_without_enums(
     code.push_str(&tracing_attribute);
 
     let input_params = if !query.choice_groups.is_empty() {
-        // Mutually-exclusive choice group: selector enum + shared/non-grouped args.
+        // Mutually-exclusive choice group: selector enum + non-grouped args.
         generate_choice_group_signature(query, type_info)
     } else if use_multiunzip {
         // For multiunzip, generate a single Vec<StructName> parameter
@@ -1077,24 +1077,6 @@ fn choice_group_is_mixed(query: &QueryDefinition, type_info: &QueryTypeInfo) -> 
     total_blocks > grouped_blocks
 }
 
-/// Parameters that appear in *every* branch of the group (deduplicated, in
-/// first-branch order). These become a single shared function argument rather
-/// than a per-variant field.
-fn choice_group_shared_params(group: &ChoiceGroup) -> Vec<String> {
-    let mut shared = Vec::new();
-    if let Some(first) = group.variants.first() {
-        for p in &first.params {
-            if shared.contains(p) {
-                continue;
-            }
-            if group.variants.iter().all(|v| v.params.contains(p)) {
-                shared.push(p.clone());
-            }
-        }
-    }
-    shared
-}
-
 /// Build a map from clean parameter name to its resolved `InputParam`
 /// (first occurrence wins). `input_types` is aligned positionally with the
 /// source-order parameter names of `query.sql`.
@@ -1128,9 +1110,9 @@ fn render_choice_param_type(ip: &InputParam) -> String {
 }
 
 /// The actual function-argument names for a choice-group query, in signature
-/// order: non-grouped params (source order), then each group's selector and
-/// shared params. Variant fields are NOT arguments (they live inside the enum),
-/// so they must be excluded from e.g. `#[tracing::instrument(skip(...))]`.
+/// order: non-grouped params (source order), then each group's selector.
+/// Variant fields are NOT arguments (they live inside the enum), so they must be
+/// excluded from e.g. `#[tracing::instrument(skip(...))]`.
 fn choice_group_arg_names(query: &QueryDefinition, type_info: &QueryTypeInfo) -> Vec<String> {
     let type_map = choice_group_type_map(query, type_info);
 
@@ -1159,11 +1141,6 @@ fn choice_group_arg_names(query: &QueryDefinition, type_info: &QueryTypeInfo) ->
     }
     for group in &query.choice_groups {
         names.push(group.selector.clone());
-        for name in choice_group_shared_params(group) {
-            if type_map.contains_key(&name) {
-                names.push(name);
-            }
-        }
     }
     names
 }
@@ -1173,16 +1150,15 @@ fn generate_choice_group_enum_defs(query: &QueryDefinition, type_info: &QueryTyp
     let type_map = choice_group_type_map(query, type_info);
     let mut code = String::new();
     for group in &query.choice_groups {
-        let shared = choice_group_shared_params(group);
         let enum_name = choice_group_enum_name(&query.name, &group.selector);
 
         code.push_str("#[derive(Debug, Clone)]\n");
         code.push_str(&format!("pub enum {} {{\n", enum_name));
         for variant in &group.variants {
-            // Variant fields = branch parameters that are not shared across all branches.
+            // Variant fields = every parameter in this branch (deduplicated).
             let mut fields: Vec<String> = Vec::new();
             for p in &variant.params {
-                if shared.contains(p) || fields.contains(p) {
+                if fields.contains(p) {
                     continue;
                 }
                 fields.push(p.clone());
@@ -1209,7 +1185,7 @@ fn generate_choice_group_enum_defs(query: &QueryDefinition, type_info: &QueryTyp
 
 /// Build the function-signature argument list for a choice-group query:
 /// non-grouped params (source order), then for each group its selector enum
-/// argument followed by that group's shared params.
+/// argument.
 fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTypeInfo) -> String {
     let type_map = choice_group_type_map(query, type_info);
 
@@ -1244,7 +1220,7 @@ fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTyp
         }
     }
 
-    // Per group: selector enum argument, then that group's shared params.
+    // Per group: selector enum argument.
     for group in &query.choice_groups {
         let enum_name = choice_group_enum_name(&query.name, &group.selector);
         let sel_ty = if group.required {
@@ -1253,12 +1229,6 @@ fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTyp
             format!("Option<{}>", enum_name)
         };
         parts.push(format!("{}: {}", group.selector, sel_ty));
-
-        for name in choice_group_shared_params(group) {
-            if let Some(ip) = type_map.get(&name) {
-                parts.push(format!("{}: {}", name, ip.rust_type()));
-            }
-        }
     }
 
     parts.join(", ")
@@ -1304,18 +1274,17 @@ fn push_choice_bind(
     }
 }
 
-/// Build a match arm pattern for a variant, destructuring only the fields that
-/// are bound (variant fields). Shared/non-grouped params are not destructured.
+/// Build a match arm pattern for a variant, destructuring all of its parameters
+/// (variant fields).
 fn choice_variant_pattern(
     enum_name: &str,
     variant: &ChoiceVariant,
-    shared: &[String],
     bind_fields: bool,
 ) -> String {
     let pascal = to_pascal_case(&variant.variant);
     let mut fields: Vec<String> = Vec::new();
     for p in &variant.params {
-        if shared.contains(p) || fields.contains(p) {
+        if fields.contains(p) {
             continue;
         }
         fields.push(p.clone());
@@ -1338,7 +1307,6 @@ fn generate_choice_group_function_body(
 ) -> Result<()> {
     let group = &query.choice_groups[0];
     let type_map = choice_group_type_map(query, type_info);
-    let shared = choice_group_shared_params(group);
     let grouped: std::collections::HashSet<String> = group
         .variants
         .iter()
@@ -1371,7 +1339,7 @@ fn generate_choice_group_function_body(
     // 1. Select the SQL string based on the chosen variant.
     body.push_str(&format!("    let sql: &str = match &{} {{\n", selector));
     for variant in &group.variants {
-        let pattern = choice_variant_pattern(&enum_name, variant, &shared, false);
+        let pattern = choice_variant_pattern(&enum_name, variant, false);
         let literal = generate_indented_raw_string_literal(variant_sql(variant.block_index)?);
         let wrapped = if group.required {
             pattern
@@ -1399,7 +1367,7 @@ fn generate_choice_group_function_body(
     body.push_str("    let mut query = sqlx::query(sql);\n");
     body.push_str(&format!("    match &{} {{\n", selector));
     for variant in &group.variants {
-        let pattern = choice_variant_pattern(&enum_name, variant, &shared, true);
+        let pattern = choice_variant_pattern(&enum_name, variant, true);
         let wrapped = if group.required {
             pattern
         } else {
@@ -1408,7 +1376,7 @@ fn generate_choice_group_function_body(
         body.push_str(&format!("        {} => {{\n", wrapped));
         for raw_name in variant_param_names(variant.block_index) {
             let clean = strip_input_suffix(raw_name);
-            let is_variant_field = grouped.contains(&clean) && !shared.contains(&clean);
+            let is_variant_field = grouped.contains(&clean);
             push_choice_bind(
                 body,
                 type_map.get(&clean),
@@ -1481,14 +1449,6 @@ fn generate_mixed_choice_conditional_body(
         .iter()
         .flat_map(|g| g.variants.iter().flat_map(|v| v.params.iter().cloned()))
         .collect();
-    // Parameters that appear in EVERY branch of their group become a single
-    // shared top-level argument (not a per-variant enum field). Groups never
-    // share parameter names (enforced by the parser), so the union is safe.
-    let shared: std::collections::HashSet<String> = query
-        .choice_groups
-        .iter()
-        .flat_map(choice_group_shared_params)
-        .collect();
 
     // Resolve the `InputParam` for a clean parameter name via source order.
     let type_of = |clean: &str| -> Option<&InputParam> {
@@ -1503,7 +1463,12 @@ fn generate_mixed_choice_conditional_body(
     let mut sql_template = parsed_sql.base_sql.clone();
     let mut current_param_num = 1usize;
     for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        if !param_name.ends_with('?') {
+        // Only truly unconditional params are baked as `$N` up front. A choice-
+        // group branch parameter has no `?` marker (it is mandatory once its
+        // variant is chosen) yet is still conditional, so it must be numbered
+        // and bound via its group's `match`, not treated as a base param.
+        if !param_name.ends_with('?') && !grouped_fields.contains(param_name.trim_end_matches('?'))
+        {
             sql_template = sql_template.replace(
                 &format!("#{{{}}}", param_name),
                 &format!("${}", current_param_num),
@@ -1551,10 +1516,6 @@ fn generate_mixed_choice_conditional_body(
         for variant in &group.variants {
             for p in &variant.params {
                 let clean = strip_input_suffix(p);
-                // Shared params are top-level arguments, not per-variant fields.
-                if shared.contains(&clean) {
-                    continue;
-                }
                 if !declared.insert(clean.clone()) {
                     continue;
                 }
@@ -1579,9 +1540,6 @@ fn generate_mixed_choice_conditional_body(
             let mut fields: Vec<String> = Vec::new();
             for p in &variant.params {
                 let clean = strip_input_suffix(p);
-                if shared.contains(&clean) {
-                    continue;
-                }
                 if !fields.contains(&clean) {
                     fields.push(clean);
                 }
@@ -1637,7 +1595,8 @@ fn generate_mixed_choice_conditional_body(
     body.push_str("    #[allow(unused_assignments)]\n");
     body.push_str("    let mut param_counter = 1;\n");
     for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        if !param_name.ends_with('?') {
+        if !param_name.ends_with('?') && !grouped_fields.contains(param_name.trim_end_matches('?'))
+        {
             body.push_str(&format!(
                 "    final_sql = final_sql.replace(r\"#{{{}}}\", &format!(\"${{}}\", param_counter));\n",
                 param_name
@@ -1649,8 +1608,8 @@ fn generate_mixed_choice_conditional_body(
     for block in &parsed_sql.conditional_blocks {
         for param_name in &block.parameters {
             let clean_param = param_name.trim_end_matches('?');
-            // A shared param appears in several branches but only one survives in
-            // the final SQL, so number it exactly once (at its first occurrence).
+            // A parameter may appear in several mutually-exclusive branches but
+            // only one survives in the final SQL, so number it exactly once.
             if !renumbered.insert(clean_param.to_string()) {
                 continue;
             }
@@ -1675,6 +1634,11 @@ fn generate_mixed_choice_conditional_body(
             continue;
         }
         let clean_param = param_name.clone();
+        // Choice-group branch params are bound inside their group's `match`
+        // below, not as base params.
+        if grouped_fields.contains(&clean_param) {
+            continue;
+        }
         if let Some(ip) = type_of(&clean_param) {
             if ip.needs_json_wrapper {
                 if ip.is_pg_array() {
@@ -1693,23 +1657,19 @@ fn generate_mixed_choice_conditional_body(
     for block in &parsed_sql.conditional_blocks {
         for param_name in &block.parameters {
             let clean_param = param_name.trim_end_matches('?').to_string();
-            // Bind a shared param exactly once (it is numbered once above).
+            // Bind each distinct parameter exactly once (numbered once above).
             if !bound.insert(clean_param.clone()) {
                 continue;
             }
-            let is_shared = shared.contains(&clean_param);
-            let is_field = grouped_fields.contains(&clean_param) && !is_shared;
+            let is_field = grouped_fields.contains(&clean_param);
             body.push_str(&format!(
                 "    if included_params.contains(&r\"{}\") {{\n",
                 clean_param
             ));
             if let Some(ip) = type_of(&clean_param) {
-                // Shared params are top-level args (bind by reference); grouped
-                // branch fields come from `match &selector` (already `&T` after
-                // `.unwrap()`); additive params are `Option<T>` args.
-                let value = if is_shared {
-                    format!("&{}", clean_param)
-                } else if is_field {
+                // Grouped branch fields are staged into `_cg` locals inside each
+                // group's `match`; additive params are `Option<T>` args.
+                let value = if is_field {
                     format!("{}_cg.unwrap()", clean_param)
                 } else {
                     format!("{}.as_ref().unwrap()", clean_param)

@@ -581,7 +581,7 @@ impl AutoModel {
                 let type_info = extract_query_types(
                     client,
                     &query.sql,
-                    &query.sql_variants,
+                    &query.explain_variants,
                     query.types.as_ref(),
                 )
                 .await?;
@@ -665,7 +665,7 @@ impl AutoModel {
 
         // Pre-compute EXPLAIN parameters for all variants
         let mut explain_params = Vec::new();
-        for (converted_sql, param_names, _variant_label) in &query.sql_variants {
+        for (converted_sql, param_names, _variant_label) in &query.explain_variants {
             if param_names.is_empty() {
                 explain_params.push(None);
             } else {
@@ -728,15 +728,15 @@ impl AutoModel {
         query: &QueryDefinition,
         explain_params: &[Option<ExplainParams>],
     ) -> Result<PerformanceAnalysis> {
-        // Use first variant (base query) for detection
-        let (_converted_sql, param_names, _label) = &query.sql_variants[0];
+        // Use first variant (all ungrouped blocks + first branch of each group)
+        let (_converted_sql, param_names, _label) = &query.explain_variants[0];
 
         // Try EXPLAIN with pre-computed parameters
         let explain_result = if !param_names.is_empty() {
             if let Some(params) = &explain_params[0] {
                 if params.special_params.is_empty() {
                     // No special params, use dummy params for all parameters
-                    let (converted_sql, _param_names, _label) = &query.sql_variants[0];
+                    let (converted_sql, _param_names, _label) = &query.explain_variants[0];
                     match client.prepare(converted_sql).await {
                         Ok(statement) => {
                             let param_types = statement.params();
@@ -751,7 +751,7 @@ impl AutoModel {
                 } else {
                     // Has special params - some are inlined, others need dummy values
                     // Prepare to get param types for non-special params
-                    let (converted_sql, _param_names, _label) = &query.sql_variants[0];
+                    let (converted_sql, _param_names, _label) = &query.explain_variants[0];
                     match client.prepare(converted_sql).await {
                         Ok(statement) => {
                             let param_types = statement.params();
@@ -781,7 +781,7 @@ impl AutoModel {
             }
         } else {
             // No parameters, execute directly
-            let (converted_sql, _, _) = &query.sql_variants[0];
+            let (converted_sql, _, _) = &query.explain_variants[0];
             let explain_sql = format!("EXPLAIN (FORMAT TEXT, ANALYZE false) {}", converted_sql);
             client.query(&explain_sql, &[]).await
         };
@@ -914,9 +914,9 @@ impl AutoModel {
         let mut warnings = Vec::new();
         let mut full_query_plan = String::new();
 
-        // Analyze each variant from pre-processed sql_variants
+        // Analyze each variant from the pre-processed group-aware explain_variants
         for (i, (converted_sql, param_names, variant_label)) in
-            query.sql_variants.iter().enumerate()
+            query.explain_variants.iter().enumerate()
         {
             let variant_name = format!("{} ({})", query.name, variant_label);
 
@@ -940,7 +940,7 @@ impl AutoModel {
             if i > 0 {
                 full_query_plan.push_str("\n\n");
             }
-            if query.sql_variants.len() > 1 {
+            if query.explain_variants.len() > 1 {
                 full_query_plan.push_str(&format!("=== {} ===\n", variant_name));
             }
             full_query_plan.push_str(&variant_plan);

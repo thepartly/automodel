@@ -316,23 +316,8 @@ pub struct FindUsersByNameAndAgeItem {
 /// Find public.users by name pattern with optional minimum age filter (using conditional syntax)
 ///
 /// Query Plan:
-/// === find_users_by_name_and_age (base) ===
-/// Seq Scan on users
-///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
-/// JIT:
-///   Functions: 4
-///   Options: Inlining true, Optimization true, Expressions true, Deforming true
-/// 
-/// === find_users_by_name_and_age (variant 1) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (age >= 0)
-///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
-///   ->  Bitmap Index Scan on idx_users_age
-///         Index Cond: (age >= 0)
-/// 
-/// === find_users_by_name_and_age (variant 2) ===
 /// Index Scan using idx_users_age on users
-///   Index Cond: (age <= 0)
+///   Index Cond: ((age >= 0) AND (age <= 0))
 ///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age \nFROM public.users \nWHERE name ILIKE #{name_pattern} \n#[AND age >= #{min_age?}] \nAND name = #{name_exact} \n#[AND age <= #{max_age?}] \nORDER BY name"))]
 pub async fn find_users_by_name_and_age(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_pattern: String, min_age: Option<i32>, name_exact: String, max_age: Option<i32>) -> Result<Vec<FindUsersByNameAndAgeItem>, super::ErrorReadOnly> {
@@ -548,39 +533,13 @@ pub struct SearchUsersAdvancedItem {
 /// Advanced user search with multiple optional filters using conditional syntax
 ///
 /// Query Plan:
-/// === search_users_advanced (base) ===
-/// Sort
-///   Sort Key: created_at DESC
-///   ->  Seq Scan on users
-/// JIT:
-///   Functions: 2
-///   Options: Inlining true, Optimization true, Expressions true, Deforming true
-/// 
-/// === search_users_advanced (variant 1) ===
-/// Sort
-///   Sort Key: created_at DESC
-///   ->  Seq Scan on users
-///         Filter: ((name)::text ~~* 'dummy'::text)
-/// JIT:
-///   Functions: 4
-///   Options: Inlining true, Optimization true, Expressions true, Deforming true
-/// 
-/// === search_users_advanced (variant 2) ===
 /// Sort
 ///   Sort Key: created_at DESC
 ///   ->  Bitmap Heap Scan on users
 ///         Recheck Cond: (age >= 0)
+///         Filter: (((name)::text ~~* 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone))
 ///         ->  Bitmap Index Scan on idx_users_age
 ///               Index Cond: (age >= 0)
-/// 
-/// === search_users_advanced (variant 3) ===
-/// Sort
-///   Sort Key: created_at DESC
-///   ->  Seq Scan on users
-///         Filter: (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
-/// JIT:
-///   Functions: 4
-///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, created_at \nFROM public.users \nWHERE 1=1 \n#[AND name ILIKE #{name_pattern?}] \n#[AND age >= #{min_age?}] \n#[AND created_at >= #{since?}] \nORDER BY created_at DESC"))]
 pub async fn search_users_advanced(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_pattern: Option<String>, min_age: Option<i32>, since: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<SearchUsersAdvancedItem>, super::ErrorReadOnly> {
     let mut final_sql = r"SELECT id, name, email, age, created_at 
@@ -2162,14 +2121,6 @@ pub struct GetUsersCursorItem {
 /// Keyset pagination over users using a two-parameter conditional cursor block
 ///
 /// Query Plan:
-/// === get_users_cursor (base) ===
-/// Limit
-///   ->  Incremental Sort
-///         Sort Key: updated_at, id
-///         Presorted Key: updated_at
-///         ->  Index Scan using idx_users_updated_at on users
-/// 
-/// === get_users_cursor (variant 1) ===
 /// Limit
 ///   ->  Incremental Sort
 ///         Sort Key: updated_at, id
@@ -2245,25 +2196,25 @@ pub enum GetUsersMultiSortCursorSort {
     UaAsc {
         cursor_ts: chrono::DateTime<chrono::Utc>,
         cursor_id: i32,
+        page_size: i64,
     },
     UaDesc {
         cursor_ts: chrono::DateTime<chrono::Utc>,
         cursor_id: i32,
+        page_size: i64,
     },
-    NameAsc,
-    NameDesc,
+    NameAsc {
+        page_size: i64,
+    },
+    NameDesc {
+        page_size: i64,
+    },
 }
 
 /// Keyset pagination over users with mutually-exclusive sort modes
 ///
 /// Query Plan:
 /// === get_users_multi_sort_cursor (base) ===
-/// Seq Scan on users
-/// JIT:
-///   Functions: 2
-///   Options: Inlining true, Optimization true, Expressions true, Deforming true
-/// 
-/// === get_users_multi_sort_cursor (variant 1) ===
 /// Limit
 ///   ->  Incremental Sort
 ///         Sort Key: updated_at, id
@@ -2272,7 +2223,7 @@ pub enum GetUsersMultiSortCursorSort {
 ///               Index Cond: (updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
 ///               Filter: (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
 /// 
-/// === get_users_multi_sort_cursor (variant 2) ===
+/// === get_users_multi_sort_cursor (variant 1) ===
 /// Limit
 ///   ->  Incremental Sort
 ///         Sort Key: updated_at DESC, id DESC
@@ -2281,7 +2232,7 @@ pub enum GetUsersMultiSortCursorSort {
 ///               Index Cond: (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone)
 ///               Filter: (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
 /// 
-/// === get_users_multi_sort_cursor (variant 3) ===
+/// === get_users_multi_sort_cursor (variant 2) ===
 /// Limit
 ///   ->  Sort
 ///         Sort Key: name, id
@@ -2290,7 +2241,7 @@ pub enum GetUsersMultiSortCursorSort {
 ///   Functions: 3
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 /// 
-/// === get_users_multi_sort_cursor (variant 4) ===
+/// === get_users_multi_sort_cursor (variant 3) ===
 /// Limit
 ///   ->  Sort
 ///         Sort Key: name DESC, id DESC
@@ -2299,7 +2250,7 @@ pub enum GetUsersMultiSortCursorSort {
 ///   Functions: 3
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, updated_at\nFROM public.users\nWHERE 1 = 1\n#[AND (updated_at, id) > (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at ASC, id ASC LIMIT #{page_size?}]\n#[AND (updated_at, id) < (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at DESC, id DESC LIMIT #{page_size?}]\n#[ORDER BY name ASC, id ASC LIMIT #{page_size?}]\n#[ORDER BY name DESC, id DESC LIMIT #{page_size?}]"))]
-pub async fn get_users_multi_sort_cursor(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, sort: GetUsersMultiSortCursorSort, page_size: i64) -> Result<Vec<GetUsersMultiSortCursorItem>, super::ErrorReadOnly> {
+pub async fn get_users_multi_sort_cursor(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, sort: GetUsersMultiSortCursorSort) -> Result<Vec<GetUsersMultiSortCursorItem>, super::ErrorReadOnly> {
     let sql: &str = match &sort {
         GetUsersMultiSortCursorSort::UaAsc { .. } => r"SELECT id, name, email, updated_at
         FROM public.users
@@ -2310,13 +2261,13 @@ pub async fn get_users_multi_sort_cursor(executor: impl sqlx::Executor<'_, Datab
         WHERE 1 = 1
         
         AND (updated_at, id) < ($1, $2) ORDER BY updated_at DESC, id DESC LIMIT $3",
-        GetUsersMultiSortCursorSort::NameAsc => r"SELECT id, name, email, updated_at
+        GetUsersMultiSortCursorSort::NameAsc { .. } => r"SELECT id, name, email, updated_at
         FROM public.users
         WHERE 1 = 1
         
         
         ORDER BY name ASC, id ASC LIMIT $1",
-        GetUsersMultiSortCursorSort::NameDesc => r"SELECT id, name, email, updated_at
+        GetUsersMultiSortCursorSort::NameDesc { .. } => r"SELECT id, name, email, updated_at
         FROM public.users
         WHERE 1 = 1
         
@@ -2327,21 +2278,21 @@ pub async fn get_users_multi_sort_cursor(executor: impl sqlx::Executor<'_, Datab
 
     let mut query = sqlx::query(sql);
     match &sort {
-        GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id } => {
+        GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id, page_size } => {
             query = query.bind(cursor_ts);
             query = query.bind(cursor_id);
-            query = query.bind(&page_size);
+            query = query.bind(page_size);
         }
-        GetUsersMultiSortCursorSort::UaDesc { cursor_ts, cursor_id } => {
+        GetUsersMultiSortCursorSort::UaDesc { cursor_ts, cursor_id, page_size } => {
             query = query.bind(cursor_ts);
             query = query.bind(cursor_id);
-            query = query.bind(&page_size);
+            query = query.bind(page_size);
         }
-        GetUsersMultiSortCursorSort::NameAsc => {
-            query = query.bind(&page_size);
+        GetUsersMultiSortCursorSort::NameAsc { page_size } => {
+            query = query.bind(page_size);
         }
-        GetUsersMultiSortCursorSort::NameDesc => {
-            query = query.bind(&page_size);
+        GetUsersMultiSortCursorSort::NameDesc { page_size } => {
+            query = query.bind(page_size);
         }
     }
 
@@ -2389,127 +2340,42 @@ pub enum SearchUsersFilteredSort {
 ///
 /// Query Plan:
 /// === search_users_filtered (base) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
+/// Limit
+///   ->  Index Scan using idx_users_age on users
+///         Index Cond: ((age >= 0) AND (age <= 0))
+///         Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 /// 
 /// === search_users_filtered (variant 1) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: ((name)::text = 'dummy'::text)
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
+/// Limit
+///   ->  Sort
+///         Sort Key: updated_at, id
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
+///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 /// 
 /// === search_users_filtered (variant 2) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: ((name)::text ~~ 'dummy'::text)
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
+/// Limit
+///   ->  Sort
+///         Sort Key: updated_at DESC, id DESC
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
+///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 /// 
 /// === search_users_filtered (variant 3) ===
-/// Index Scan using users_email_key on users
-///   Index Cond: ((email)::text = 'dummy'::text)
-///   Filter: (id >= 0)
+/// Limit
+///   ->  Sort
+///         Sort Key: id
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
+///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 /// 
 /// === search_users_filtered (variant 4) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (age >= 0)
-///   Filter: (id >= 0)
-///   ->  Bitmap Index Scan on idx_users_age
-///         Index Cond: (age >= 0)
-/// 
-/// === search_users_filtered (variant 5) ===
-/// Index Scan using idx_users_age on users
-///   Index Cond: (age <= 0)
-///   Filter: (id >= 0)
-/// 
-/// === search_users_filtered (variant 6) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: (NOT is_active)
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 7) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 8) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone)
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 9) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 10) ===
-/// Index Scan using idx_users_updated_at on users
-///   Index Cond: (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone)
-///   Filter: ((id >= 0) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)))
-/// 
-/// === search_users_filtered (variant 11) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: (ROW((name)::text, id) > ROW('dummy'::text, 0))
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 12) ===
-/// Bitmap Heap Scan on users
-///   Recheck Cond: (id >= 0)
-///   Filter: (ROW((name)::text, id) < ROW('dummy'::text, 0))
-///   ->  Bitmap Index Scan on users_pkey
-///         Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 13) ===
-/// Limit
-///   ->  Index Scan using users_pkey on users
-///         Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 14) ===
-/// Limit
-///   ->  Incremental Sort
-///         Sort Key: updated_at, id
-///         Presorted Key: updated_at
-///         ->  Index Scan using idx_users_updated_at on users
-///               Filter: (id >= 0)
-/// 
-/// === search_users_filtered (variant 15) ===
-/// Limit
-///   ->  Incremental Sort
-///         Sort Key: updated_at DESC, id DESC
-///         Presorted Key: updated_at
-///         ->  Index Scan Backward using idx_users_updated_at on users
-///               Filter: (id >= 0)
-/// 
-/// === search_users_filtered (variant 16) ===
 /// Limit
 ///   ->  Sort
-///         Sort Key: name, id
-///         ->  Bitmap Heap Scan on users
-///               Recheck Cond: (id >= 0)
-///               ->  Bitmap Index Scan on users_pkey
-///                     Index Cond: (id >= 0)
-/// 
-/// === search_users_filtered (variant 17) ===
-/// Limit
-///   ->  Sort
-///         Sort Key: name DESC, id DESC
-///         ->  Bitmap Heap Scan on users
-///               Recheck Cond: (id >= 0)
-///               ->  Bitmap Index Scan on users_pkey
-///                     Index Cond: (id >= 0)
+///         Sort Key: id DESC
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
+///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE id >= #{min_id}\n  #[AND name = #{name_exact?}]              \n  #[AND name LIKE #{name_starts_with?}]      \n  #[AND email = #{email_exact?}]\n  #[AND age >= #{age_from?}]                \n  #[AND age <= #{age_to?}]\n  #[AND is_active = #{is_active?}]\n  #[AND created_at >= #{created_from?}]\n  #[AND created_at <= #{created_to?}]\n  #[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]\n  #[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]\n  #[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]\n  #[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]\n#[LIMIT 100]\n#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]\n#[ORDER BY name ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY name DESC, id DESC LIMIT #{limit?}]"))]
 pub async fn search_users_filtered(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_id: i32, name_exact: Option<String>, name_starts_with: Option<String>, email_exact: Option<String>, age_from: Option<i32>, age_to: Option<i32>, is_active: Option<bool>, created_from: Option<chrono::DateTime<chrono::Utc>>, created_to: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_id: Option<i32>, cursor_ua_desc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_desc_id: Option<i32>, cursor_name_asc_val: Option<String>, cursor_name_asc_id: Option<i32>, cursor_name_desc_val: Option<String>, cursor_name_desc_id: Option<i32>, sort: SearchUsersFilteredSort) -> Result<Vec<SearchUsersFilteredItem>, super::ErrorReadOnly> {
     let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at

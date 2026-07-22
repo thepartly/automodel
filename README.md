@@ -529,16 +529,15 @@ This generates an enum and a single `sort` argument:
 
 ```rust
 pub enum GetUsersMultiSortCursorSort {
-    UaAsc { cursor_ts: chrono::DateTime<chrono::Utc>, cursor_id: i32 },
-    UaDesc { cursor_ts: chrono::DateTime<chrono::Utc>, cursor_id: i32 },
-    NameAsc,
-    NameDesc,
+    UaAsc { cursor_ts: chrono::DateTime<chrono::Utc>, cursor_id: i32, page_size: i64 },
+    UaDesc { cursor_ts: chrono::DateTime<chrono::Utc>, cursor_id: i32, page_size: i64 },
+    NameAsc { page_size: i64 },
+    NameDesc { page_size: i64 },
 }
 
 pub async fn get_users_multi_sort_cursor(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     sort: GetUsersMultiSortCursorSort,
-    page_size: i64,
 ) -> Result<Vec<GetUsersMultiSortCursorItem>, /* ... */> { /* ... */ }
 ```
 
@@ -547,15 +546,14 @@ pub async fn get_users_multi_sort_cursor(
 // variant's required fields are supplied.
 let page = get_users_multi_sort_cursor(
     pool,
-    GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id },
-    20,
+    GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id, page_size: 20 },
 ).await?;
 ```
 
-**Parameter placement is inferred automatically:**
+**Parameter placement is simple:**
 
-- A parameter that appears in **every** branch (like `page_size`) becomes a **shared top-level argument**.
-- A parameter that appears in **only some** branches (like `cursor_ts` / `cursor_id`) becomes a **field on each enum variant that uses it**.
+- Every parameter referenced **inside a branch** becomes a **field on that enum variant** — even if the same parameter name appears in more than one branch (like `page_size`), each variant gets its own field.
+- Only ungrouped/additive parameters and other groups' selectors become top-level function arguments.
 
 **Rules** (enforced at build time with clear errors):
 
@@ -579,10 +577,14 @@ WHERE id >= #{min_id}
 #[#{sort=name_desc!} ORDER BY name DESC, id DESC LIMIT #{limit?}]
 ```
 
-Here the additive filters stay optional and combine freely, while `sort` is a required enum picking exactly one ordering. Because `limit` appears in **every** branch it becomes a single shared `limit: i64` argument, so the enum variants are plain units:
+Here the additive filters stay optional and combine freely, while `sort` is a required enum picking exactly one ordering. Because `limit` is referenced inside every branch, each variant carries its own `limit` field:
 
 ```rust
-pub enum SearchUsersSort { Unsorted, NameAsc, NameDesc }
+pub enum SearchUsersSort {
+    Unsorted { limit: i64 },
+    NameAsc { limit: i64 },
+    NameDesc { limit: i64 },
+}
 
 pub async fn search_users(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
@@ -590,11 +592,10 @@ pub async fn search_users(
     name_starts_with: Option<String>,
     age_from: Option<i32>,
     sort: SearchUsersSort,
-    limit: i64,
 ) -> Result<Vec<SearchUsersItem>, /* ... */> { /* ... */ }
 ```
 
-When mixing, each choice-group parameter is placed automatically based on how many branches use it: a parameter in **every** branch becomes a shared top-level argument, while a parameter used by only **some** branches becomes a per-variant field on each branch that references it. A branch may also carry **no** parameters at all (e.g. `#[#{sort=unsorted!} LIMIT 100]` with a hardcoded limit), in which case it generates a plain unit variant.
+When mixing, every parameter referenced inside a branch becomes a per-variant field on that branch. A branch may also carry **no** parameters at all (e.g. `#[#{sort=unsorted!} LIMIT 100]` with a hardcoded limit), in which case it generates a plain unit variant.
 
 #### Multiple choice groups in one query
 
