@@ -494,6 +494,138 @@ Suffixes are orthogonal and compose: `?` controls optionality, second `?` adds v
 
 > **Note:** Top-level `Option<>` in type mappings is banned. Use suffix annotations instead. If a custom type mapping like `Vec<Option<T>>` already has nullable elements, the `[?]` suffix is a no-op (no double-wrapping).
 
+### Exclusive Choice Blocks (Case Syntax)
+
+Additive [conditional blocks](#conditional-queries) (`#[ ... ]`) are AND-combined, so several can apply at once. Sometimes, though, the caller must pick **exactly one** of several mutually-exclusive branches (e.g. a sort mode, or one of several keyset-pagination orderings). Marking each block with a selector directive turns the group into a single generated Rust `enum` argument, so illegal combinations become unrepresentable.
+
+A choice block starts with a directive as its very first token:
+
+```
+#[#{selector=variant!} ...sql...]     -- required: arg is `selector: Enum`
+#[#{selector=variant?} ...sql...]     -- optional: arg is `selector: Option<Enum>`
+```
+
+- `selector` is the shared group name (same across all branches) and becomes the function argument name.
+- `variant` is the branch name and becomes an enum variant.
+- The trailing marker is mandatory: `!` makes the choice required, `?` makes it optional (where `None` selects the base query with all blocks removed).
+
+Example — keyset pagination over four mutually-exclusive sort modes:
+
+```sql
+-- @automodel
+--    description: Keyset pagination with mutually-exclusive sort modes
+--    expect: multiple
+-- @end
+SELECT id, name, email, updated_at
+FROM users
+WHERE 1 = 1
+#[#{sort=ua_asc!}   AND (updated_at, id) > (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at ASC,  id ASC  LIMIT #{page_size?}]
+#[#{sort=ua_desc!}  AND (updated_at, id) < (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at DESC, id DESC LIMIT #{page_size?}]
+#[#{sort=name_asc!}                                                        ORDER BY name ASC,       id ASC  LIMIT #{page_size?}]
+#[#{sort=name_desc!}                                                       ORDER BY name DESC,      id DESC LIMIT #{page_size?}]
+```
+
+This generates an enum and a single `sort` argument:
+
+```rust
+pub enum GetUsersMultiSortCursorSort {
+    UaAsc { cursor_ts: chrono::DateTime<chrono::Utc>, cursor_id: i32 },
+    UaDesc { cursor_ts: chrono::DateTime<chrono::Utc>, cursor_id: i32 },
+    NameAsc,
+    NameDesc,
+}
+
+pub async fn get_users_multi_sort_cursor(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    sort: GetUsersMultiSortCursorSort,
+    page_size: i64,
+) -> Result<Vec<GetUsersMultiSortCursorItem>, /* ... */> { /* ... */ }
+```
+
+```rust
+// The caller picks exactly one branch; the compiler enforces that each
+// variant's required fields are supplied.
+let page = get_users_multi_sort_cursor(
+    pool,
+    GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id },
+    20,
+).await?;
+```
+
+**Parameter placement is inferred automatically:**
+
+- A parameter that appears in **every** branch (like `page_size`) becomes a **shared top-level argument**.
+- A parameter that appears in **only some** branches (like `cursor_ts` / `cursor_id`) becomes a **field on each enum variant that uses it**.
+
+**Rules** (enforced at build time with clear errors):
+
+- A query may declare **multiple independent choice groups** (see below); each distinct selector name becomes its own enum argument.
+- A choice group may **coexist with additive `#[...]` blocks** in the same query (see below); blocks without a directive keep their additive `Option<T>` behavior.
+- All branches of a group must use the **same** optionality marker (`!` or `?`).
+- Variant names within a group must be unique.
+- A parameter may belong to **at most one** choice group (it cannot be shared across two different groups).
+
+#### Mixing choice blocks with additive blocks
+
+A choice group can share a query with ordinary additive `#[...]` blocks — for example additive `WHERE` filters plus an enum-selected sort mode:
+
+```sql
+SELECT id, name, email FROM users
+WHERE id >= #{min_id}
+  #[AND name LIKE #{name_starts_with?}]   -- additive: Option<String> argument
+  #[AND age >= #{age_from?}]              -- additive: Option<i32> argument
+#[#{sort=unsorted!}  LIMIT #{limit?}]
+#[#{sort=name_asc!}  ORDER BY name ASC,  id ASC  LIMIT #{limit?}]
+#[#{sort=name_desc!} ORDER BY name DESC, id DESC LIMIT #{limit?}]
+```
+
+Here the additive filters stay optional and combine freely, while `sort` is a required enum picking exactly one ordering. Because `limit` appears in **every** branch it becomes a single shared `limit: i64` argument, so the enum variants are plain units:
+
+```rust
+pub enum SearchUsersSort { Unsorted, NameAsc, NameDesc }
+
+pub async fn search_users(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    min_id: i32,
+    name_starts_with: Option<String>,
+    age_from: Option<i32>,
+    sort: SearchUsersSort,
+    limit: i64,
+) -> Result<Vec<SearchUsersItem>, /* ... */> { /* ... */ }
+```
+
+When mixing, each choice-group parameter is placed automatically based on how many branches use it: a parameter in **every** branch becomes a shared top-level argument, while a parameter used by only **some** branches becomes a per-variant field on each branch that references it. A branch may also carry **no** parameters at all (e.g. `#[#{sort=unsorted!} LIMIT 100]` with a hardcoded limit), in which case it generates a plain unit variant.
+
+#### Multiple choice groups in one query
+
+A query may declare several independent choice groups, each with its own selector name. Each group compiles to its own enum argument and is selected independently — for example an optional age-`range` group alongside a required `sort` group:
+
+```sql
+SELECT id, name, email, age FROM users
+WHERE email LIKE #{email_prefix}
+  #[#{range=min?} AND age >= #{min_age?}]
+  #[#{range=max?} AND age <= #{max_age?}]
+#[#{sort=asc!}  ORDER BY id ASC  LIMIT #{lim?}]
+#[#{sort=desc!} ORDER BY id DESC LIMIT #{lim?}]
+```
+
+`range` is optional (`?`, so `None` applies no age bound) and each branch carries its own field, while `sort` is required (`!`) and shares `lim` across both branches:
+
+```rust
+pub enum MultiGroupSearchRange { Min { min_age: i32 }, Max { max_age: i32 } }
+pub enum MultiGroupSearchSort  { Asc, Desc }
+
+pub async fn multi_group_search(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    email_prefix: String,
+    range: Option<MultiGroupSearchRange>,
+    sort: MultiGroupSearchSort,
+    lim: i64,
+) -> Result<Vec<MultiGroupSearchItem>, /* ... */> { /* ... */ }
+```
+
+The only restriction is that a given parameter name may not be shared between two different groups, since the generator numbers and binds each parameter exactly once.
+
 ### Non-Null Column Override
 
 By default, expression columns (computed values, function results, literals) are generated as `Option<T>` because PostgreSQL's prepared-statement metadata doesn't report nullability for expressions — only for direct table columns with `NOT NULL` constraints.

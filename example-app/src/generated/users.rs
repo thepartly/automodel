@@ -324,12 +324,14 @@ pub struct FindUsersByNameAndAgeItem {
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 /// 
 /// === find_users_by_name_and_age (variant 1) ===
-/// Index Scan using idx_users_age_updated_at on users
-///   Index Cond: (age >= 0)
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (age >= 0)
 ///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
+///   ->  Bitmap Index Scan on idx_users_age
+///         Index Cond: (age >= 0)
 /// 
 /// === find_users_by_name_and_age (variant 2) ===
-/// Index Scan using idx_users_age_updated_at on users
+/// Index Scan using idx_users_age on users
 ///   Index Cond: (age <= 0)
 ///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age \nFROM public.users \nWHERE name ILIKE #{name_pattern} \n#[AND age >= #{min_age?}] \nAND name = #{name_exact} \n#[AND age <= #{max_age?}] \nORDER BY name"))]
@@ -566,8 +568,10 @@ pub struct SearchUsersAdvancedItem {
 /// === search_users_advanced (variant 2) ===
 /// Sort
 ///   Sort Key: created_at DESC
-///   ->  Index Scan using idx_users_age_updated_at on users
-///         Index Cond: (age >= 0)
+///   ->  Bitmap Heap Scan on users
+///         Recheck Cond: (age >= 0)
+///         ->  Bitmap Index Scan on idx_users_age
+///               Index Cond: (age >= 0)
 /// 
 /// === search_users_advanced (variant 3) ===
 /// Sort
@@ -2222,6 +2226,587 @@ LIMIT $1".to_string();
         id: row.try_get::<i32, _>("id")?,
         name: row.try_get::<String, _>("name")?,
         email: row.try_get::<String, _>("email")?,
+        updated_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct GetUsersMultiSortCursorItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum GetUsersMultiSortCursorSort {
+    UaAsc {
+        cursor_ts: chrono::DateTime<chrono::Utc>,
+        cursor_id: i32,
+    },
+    UaDesc {
+        cursor_ts: chrono::DateTime<chrono::Utc>,
+        cursor_id: i32,
+    },
+    NameAsc,
+    NameDesc,
+}
+
+/// Keyset pagination over users with mutually-exclusive sort modes
+///
+/// Query Plan:
+/// === get_users_multi_sort_cursor (base) ===
+/// Seq Scan on users
+/// JIT:
+///   Functions: 2
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+/// 
+/// === get_users_multi_sort_cursor (variant 1) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: updated_at, id
+///         Presorted Key: updated_at
+///         ->  Index Scan using idx_users_updated_at on users
+///               Index Cond: (updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
+///               Filter: (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
+/// 
+/// === get_users_multi_sort_cursor (variant 2) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: updated_at DESC, id DESC
+///         Presorted Key: updated_at
+///         ->  Index Scan Backward using idx_users_updated_at on users
+///               Index Cond: (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone)
+///               Filter: (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
+/// 
+/// === get_users_multi_sort_cursor (variant 3) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: name, id
+///         ->  Seq Scan on users
+/// JIT:
+///   Functions: 3
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+/// 
+/// === get_users_multi_sort_cursor (variant 4) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: name DESC, id DESC
+///         ->  Seq Scan on users
+/// JIT:
+///   Functions: 3
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, updated_at\nFROM public.users\nWHERE 1 = 1\n#[AND (updated_at, id) > (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at ASC, id ASC LIMIT #{page_size?}]\n#[AND (updated_at, id) < (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at DESC, id DESC LIMIT #{page_size?}]\n#[ORDER BY name ASC, id ASC LIMIT #{page_size?}]\n#[ORDER BY name DESC, id DESC LIMIT #{page_size?}]"))]
+pub async fn get_users_multi_sort_cursor(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, sort: GetUsersMultiSortCursorSort, page_size: i64) -> Result<Vec<GetUsersMultiSortCursorItem>, super::ErrorReadOnly> {
+    let sql: &str = match &sort {
+        GetUsersMultiSortCursorSort::UaAsc { .. } => r"SELECT id, name, email, updated_at
+        FROM public.users
+        WHERE 1 = 1
+        AND (updated_at, id) > ($1, $2) ORDER BY updated_at ASC, id ASC LIMIT $3",
+        GetUsersMultiSortCursorSort::UaDesc { .. } => r"SELECT id, name, email, updated_at
+        FROM public.users
+        WHERE 1 = 1
+        
+        AND (updated_at, id) < ($1, $2) ORDER BY updated_at DESC, id DESC LIMIT $3",
+        GetUsersMultiSortCursorSort::NameAsc => r"SELECT id, name, email, updated_at
+        FROM public.users
+        WHERE 1 = 1
+        
+        
+        ORDER BY name ASC, id ASC LIMIT $1",
+        GetUsersMultiSortCursorSort::NameDesc => r"SELECT id, name, email, updated_at
+        FROM public.users
+        WHERE 1 = 1
+        
+        
+        
+        ORDER BY name DESC, id DESC LIMIT $1",
+    };
+
+    let mut query = sqlx::query(sql);
+    match &sort {
+        GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id } => {
+            query = query.bind(cursor_ts);
+            query = query.bind(cursor_id);
+            query = query.bind(&page_size);
+        }
+        GetUsersMultiSortCursorSort::UaDesc { cursor_ts, cursor_id } => {
+            query = query.bind(cursor_ts);
+            query = query.bind(cursor_id);
+            query = query.bind(&page_size);
+        }
+        GetUsersMultiSortCursorSort::NameAsc => {
+            query = query.bind(&page_size);
+        }
+        GetUsersMultiSortCursorSort::NameDesc => {
+            query = query.bind(&page_size);
+        }
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(GetUsersMultiSortCursorItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
+        updated_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchUsersFilteredItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub age: Option<i32>,
+    pub is_active: Option<bool>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SearchUsersFilteredSort {
+    Unsorted,
+    UaAsc {
+        limit: i64,
+    },
+    UaDesc {
+        limit: i64,
+    },
+    NameAsc {
+        limit: i64,
+    },
+    NameDesc {
+        limit: i64,
+    },
+}
+
+/// Filtered users search mirroring a real prod usecase with a required base predicate, optional AND-combined WHERE filters, a keyset cursor condition, and an enum-selected sort mode where sorted branches carry a per-variant limit and the unsorted branch hardcodes its limit
+///
+/// Query Plan:
+/// === search_users_filtered (base) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 1) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   Filter: ((name)::text = 'dummy'::text)
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 2) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   Filter: ((name)::text ~~ 'dummy'::text)
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 3) ===
+/// Index Scan using users_email_key on users
+///   Index Cond: ((email)::text = 'dummy'::text)
+///   Filter: (id >= 0)
+/// 
+/// === search_users_filtered (variant 4) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (age >= 0)
+///   Filter: (id >= 0)
+///   ->  Bitmap Index Scan on idx_users_age
+///         Index Cond: (age >= 0)
+/// 
+/// === search_users_filtered (variant 5) ===
+/// Index Scan using idx_users_age on users
+///   Index Cond: (age <= 0)
+///   Filter: (id >= 0)
+/// 
+/// === search_users_filtered (variant 6) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   Filter: (NOT is_active)
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 7) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   Filter: (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 8) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   Filter: (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone)
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 9) ===
+/// Bitmap Heap Scan on users
+///   Filter: ((id >= 0) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)))
+///   ->  Bitmap Index Scan on idx_users_updated_at
+///         Index Cond: (updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
+/// 
+/// === search_users_filtered (variant 10) ===
+/// Index Scan using idx_users_updated_at on users
+///   Index Cond: (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone)
+///   Filter: ((id >= 0) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)))
+/// 
+/// === search_users_filtered (variant 11) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   Filter: (ROW((name)::text, id) > ROW('dummy'::text, 0))
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 12) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (id >= 0)
+///   Filter: (ROW((name)::text, id) < ROW('dummy'::text, 0))
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 13) ===
+/// Limit
+///   ->  Index Scan using users_pkey on users
+///         Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 14) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: updated_at, id
+///         Presorted Key: updated_at
+///         ->  Index Scan using idx_users_updated_at on users
+///               Filter: (id >= 0)
+/// 
+/// === search_users_filtered (variant 15) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: updated_at DESC, id DESC
+///         Presorted Key: updated_at
+///         ->  Index Scan Backward using idx_users_updated_at on users
+///               Filter: (id >= 0)
+/// 
+/// === search_users_filtered (variant 16) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: name, id
+///         ->  Bitmap Heap Scan on users
+///               Recheck Cond: (id >= 0)
+///               ->  Bitmap Index Scan on users_pkey
+///                     Index Cond: (id >= 0)
+/// 
+/// === search_users_filtered (variant 17) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: name DESC, id DESC
+///         ->  Bitmap Heap Scan on users
+///               Recheck Cond: (id >= 0)
+///               ->  Bitmap Index Scan on users_pkey
+///                     Index Cond: (id >= 0)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE id >= #{min_id}\n  #[AND name = #{name_exact?}]              \n  #[AND name LIKE #{name_starts_with?}]      \n  #[AND email = #{email_exact?}]\n  #[AND age >= #{age_from?}]                \n  #[AND age <= #{age_to?}]\n  #[AND is_active = #{is_active?}]\n  #[AND created_at >= #{created_from?}]\n  #[AND created_at <= #{created_to?}]\n  #[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]\n  #[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]\n  #[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]\n  #[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]\n#[LIMIT 100]\n#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]\n#[ORDER BY name ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY name DESC, id DESC LIMIT #{limit?}]"))]
+pub async fn search_users_filtered(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_id: i32, name_exact: Option<String>, name_starts_with: Option<String>, email_exact: Option<String>, age_from: Option<i32>, age_to: Option<i32>, is_active: Option<bool>, created_from: Option<chrono::DateTime<chrono::Utc>>, created_to: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_id: Option<i32>, cursor_ua_desc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_desc_id: Option<i32>, cursor_name_asc_val: Option<String>, cursor_name_asc_id: Option<i32>, cursor_name_desc_val: Option<String>, cursor_name_desc_id: Option<i32>, sort: SearchUsersFilteredSort) -> Result<Vec<SearchUsersFilteredItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
+FROM public.users
+WHERE id >= $1
+  #[AND name = #{name_exact?}]              
+  #[AND name LIKE #{name_starts_with?}]      
+  #[AND email = #{email_exact?}]
+  #[AND age >= #{age_from?}]                
+  #[AND age <= #{age_to?}]
+  #[AND is_active = #{is_active?}]
+  #[AND created_at >= #{created_from?}]
+  #[AND created_at <= #{created_to?}]
+  #[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]
+  #[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]
+  #[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]
+  #[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]
+#[LIMIT 100]
+#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]
+#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]
+#[ORDER BY name ASC, id ASC LIMIT #{limit?}]
+#[ORDER BY name DESC, id DESC LIMIT #{limit?}]".to_string();
+    let mut included_params = Vec::new();
+
+    if name_exact.is_some() {
+        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", r"AND name = #{name_exact?}");
+        included_params.push("name_exact");
+    } else {
+        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", "");
+    }
+
+    if name_starts_with.is_some() {
+        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", r"AND name LIKE #{name_starts_with?}");
+        included_params.push("name_starts_with");
+    } else {
+        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", "");
+    }
+
+    if email_exact.is_some() {
+        final_sql = final_sql.replace(r"#[AND email = #{email_exact?}]", r"AND email = #{email_exact?}");
+        included_params.push("email_exact");
+    } else {
+        final_sql = final_sql.replace(r"#[AND email = #{email_exact?}]", "");
+    }
+
+    if age_from.is_some() {
+        final_sql = final_sql.replace(r"#[AND age >= #{age_from?}]", r"AND age >= #{age_from?}");
+        included_params.push("age_from");
+    } else {
+        final_sql = final_sql.replace(r"#[AND age >= #{age_from?}]", "");
+    }
+
+    if age_to.is_some() {
+        final_sql = final_sql.replace(r"#[AND age <= #{age_to?}]", r"AND age <= #{age_to?}");
+        included_params.push("age_to");
+    } else {
+        final_sql = final_sql.replace(r"#[AND age <= #{age_to?}]", "");
+    }
+
+    if is_active.is_some() {
+        final_sql = final_sql.replace(r"#[AND is_active = #{is_active?}]", r"AND is_active = #{is_active?}");
+        included_params.push("is_active");
+    } else {
+        final_sql = final_sql.replace(r"#[AND is_active = #{is_active?}]", "");
+    }
+
+    if created_from.is_some() {
+        final_sql = final_sql.replace(r"#[AND created_at >= #{created_from?}]", r"AND created_at >= #{created_from?}");
+        included_params.push("created_from");
+    } else {
+        final_sql = final_sql.replace(r"#[AND created_at >= #{created_from?}]", "");
+    }
+
+    if created_to.is_some() {
+        final_sql = final_sql.replace(r"#[AND created_at <= #{created_to?}]", r"AND created_at <= #{created_to?}");
+        included_params.push("created_to");
+    } else {
+        final_sql = final_sql.replace(r"#[AND created_at <= #{created_to?}]", "");
+    }
+
+    if cursor_ua_asc_ts.is_some() {
+        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", r"AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})");
+        included_params.push("cursor_ua_asc_ts");
+        included_params.push("cursor_ua_asc_id");
+    } else {
+        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", "");
+    }
+
+    if cursor_ua_desc_ts.is_some() {
+        final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]", r"AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})");
+        included_params.push("cursor_ua_desc_ts");
+        included_params.push("cursor_ua_desc_id");
+    } else {
+        final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]", "");
+    }
+
+    if cursor_name_asc_val.is_some() {
+        final_sql = final_sql.replace(r"#[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]", r"AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})");
+        included_params.push("cursor_name_asc_val");
+        included_params.push("cursor_name_asc_id");
+    } else {
+        final_sql = final_sql.replace(r"#[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]", "");
+    }
+
+    if cursor_name_desc_val.is_some() {
+        final_sql = final_sql.replace(r"#[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]", r"AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})");
+        included_params.push("cursor_name_desc_val");
+        included_params.push("cursor_name_desc_id");
+    } else {
+        final_sql = final_sql.replace(r"#[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]", "");
+    }
+
+    let mut limit_cg: Option<&i64> = None;
+    match &sort {
+        SearchUsersFilteredSort::Unsorted => {
+            final_sql = final_sql.replace(r"#[LIMIT 100]", r"LIMIT 100");
+        }
+        SearchUsersFilteredSort::UaAsc { limit } => {
+            limit_cg = Some(limit);
+            final_sql = final_sql.replace(r"#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]", r"ORDER BY updated_at ASC, id ASC LIMIT #{limit?}");
+            included_params.push("limit");
+        }
+        SearchUsersFilteredSort::UaDesc { limit } => {
+            limit_cg = Some(limit);
+            final_sql = final_sql.replace(r"#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]", r"ORDER BY updated_at DESC, id DESC LIMIT #{limit?}");
+            included_params.push("limit");
+        }
+        SearchUsersFilteredSort::NameAsc { limit } => {
+            limit_cg = Some(limit);
+            final_sql = final_sql.replace(r"#[ORDER BY name ASC, id ASC LIMIT #{limit?}]", r"ORDER BY name ASC, id ASC LIMIT #{limit?}");
+            included_params.push("limit");
+        }
+        SearchUsersFilteredSort::NameDesc { limit } => {
+            limit_cg = Some(limit);
+            final_sql = final_sql.replace(r"#[ORDER BY name DESC, id DESC LIMIT #{limit?}]", r"ORDER BY name DESC, id DESC LIMIT #{limit?}");
+            included_params.push("limit");
+        }
+    }
+    final_sql = final_sql.replace(r"#[LIMIT 100]", "");
+    final_sql = final_sql.replace(r"#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]", "");
+    final_sql = final_sql.replace(r"#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]", "");
+    final_sql = final_sql.replace(r"#[ORDER BY name ASC, id ASC LIMIT #{limit?}]", "");
+    final_sql = final_sql.replace(r"#[ORDER BY name DESC, id DESC LIMIT #{limit?}]", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{min_id}", &format!("${}", param_counter));
+    param_counter += 1;
+    if included_params.contains(&r"name_exact") {
+        final_sql = final_sql.replace(r"#{name_exact?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"name_starts_with") {
+        final_sql = final_sql.replace(r"#{name_starts_with?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"email_exact") {
+        final_sql = final_sql.replace(r"#{email_exact?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"age_from") {
+        final_sql = final_sql.replace(r"#{age_from?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"age_to") {
+        final_sql = final_sql.replace(r"#{age_to?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"is_active") {
+        final_sql = final_sql.replace(r"#{is_active?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"created_from") {
+        final_sql = final_sql.replace(r"#{created_from?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"created_to") {
+        final_sql = final_sql.replace(r"#{created_to?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_ua_asc_ts") {
+        final_sql = final_sql.replace(r"#{cursor_ua_asc_ts?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_ua_asc_id") {
+        final_sql = final_sql.replace(r"#{cursor_ua_asc_id?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_ua_desc_ts") {
+        final_sql = final_sql.replace(r"#{cursor_ua_desc_ts?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_ua_desc_id") {
+        final_sql = final_sql.replace(r"#{cursor_ua_desc_id?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_name_asc_val") {
+        final_sql = final_sql.replace(r"#{cursor_name_asc_val?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_name_asc_id") {
+        final_sql = final_sql.replace(r"#{cursor_name_asc_id?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_name_desc_val") {
+        final_sql = final_sql.replace(r"#{cursor_name_desc_val?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cursor_name_desc_id") {
+        final_sql = final_sql.replace(r"#{cursor_name_desc_id?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"limit") {
+        final_sql = final_sql.replace(r"#{limit?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&min_id);
+    if included_params.contains(&r"name_exact") {
+        query = query.bind(name_exact.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"name_starts_with") {
+        query = query.bind(name_starts_with.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"email_exact") {
+        query = query.bind(email_exact.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"age_from") {
+        query = query.bind(age_from.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"age_to") {
+        query = query.bind(age_to.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"is_active") {
+        query = query.bind(is_active.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"created_from") {
+        query = query.bind(created_from.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"created_to") {
+        query = query.bind(created_to.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_ua_asc_ts") {
+        query = query.bind(cursor_ua_asc_ts.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_ua_asc_id") {
+        query = query.bind(cursor_ua_asc_id.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_ua_desc_ts") {
+        query = query.bind(cursor_ua_desc_ts.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_ua_desc_id") {
+        query = query.bind(cursor_ua_desc_id.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_name_asc_val") {
+        query = query.bind(cursor_name_asc_val.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_name_asc_id") {
+        query = query.bind(cursor_name_asc_id.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_name_desc_val") {
+        query = query.bind(cursor_name_desc_val.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"cursor_name_desc_id") {
+        query = query.bind(cursor_name_desc_id.as_ref().unwrap());
+    }
+
+    if included_params.contains(&r"limit") {
+        query = query.bind(limit_cg.unwrap());
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(SearchUsersFilteredItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
+        age: row.try_get::<Option<i32>, _>("age")?,
+        is_active: row.try_get::<Option<bool>, _>("is_active")?,
+        created_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at")?,
         updated_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")?,
     })
     }).collect();

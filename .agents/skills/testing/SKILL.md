@@ -124,5 +124,5 @@ docker compose up -d && \
 - **Connection refused on localhost**: If running inside a Docker container (e.g. devcontainer), `localhost:55432` won't work. Connect your container to the Postgres network and use the container hostname instead:
   ```bash
   docker network connect automodel_default <your-container-name>
-  export AUTOMODEL_DATABASE_URL="postgresql://postgres:password@automodel-postgres-1:5432/postgres"
+  export AUTOMODEL_DATABASE_URL="postgresql://postgres:password@automodel-testdb-1:5432/postgres"
   ```

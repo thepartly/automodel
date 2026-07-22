@@ -174,6 +174,42 @@ pub(crate) struct QueryDefinition {
     /// e.g., ["serde::Serialize", "serde::Deserialize"]
     /// Empty vec means no additional derives
     pub error_type_derives: Vec<String>,
+    /// Mutually-exclusive choice groups declared via `#{selector=variant!}` /
+    /// `#{selector=variant?}` directives on conditional blocks. Empty when the
+    /// query uses no choice groups.
+    pub choice_groups: Vec<ChoiceGroup>,
+}
+
+/// A single branch within a mutually-exclusive choice group.
+///
+/// Each branch corresponds to one conditional `#[...]` block that was tagged
+/// with a selector directive `#{selector=variant!}` / `#{selector=variant?}`.
+#[derive(Debug, Clone)]
+pub(crate) struct ChoiceVariant {
+    /// Variant name from the selector directive (e.g. "ua_asc").
+    pub variant: String,
+    /// Index of the corresponding conditional block in source order. The matching
+    /// pre-computed SQL lives at `QueryDefinition::sql_variants[block_index + 1]`
+    /// (index 0 is the base variant with all blocks removed).
+    pub block_index: usize,
+    /// Clean parameter names (suffixes stripped) referenced in this branch, in
+    /// source order, excluding the selector directive itself.
+    pub params: Vec<String>,
+}
+
+/// A mutually-exclusive choice group: exactly one branch (`!`, required) or at
+/// most one branch (`?`, optional) is selected at runtime via a generated enum
+/// argument. Declared in SQL by prefixing each alternative conditional block
+/// with `#{selector=variant!}` (or `?`).
+#[derive(Debug, Clone)]
+pub(crate) struct ChoiceGroup {
+    /// Selector name (e.g. "sort") — becomes the generated enum argument name.
+    pub selector: String,
+    /// `true` if a branch must be chosen (`!` marker) → `selector: Enum`.
+    /// `false` if the group is optional (`?` marker) → `selector: Option<Enum>`.
+    pub required: bool,
+    /// Branches in source order.
+    pub variants: Vec<ChoiceVariant>,
 }
 
 /// Per-query telemetry configuration

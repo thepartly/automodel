@@ -134,8 +134,15 @@ pub struct QueryTypeInfo {
     pub output_types: Vec<OutputColumn>,
     /// Parsed SQL with conditional blocks (if any)
     pub parsed_sql: Option<ParsedSql>,
-    /// The prepared statement, retained for building the TypeSystem
-    pub statement: Statement,
+    /// The prepared statement(s), retained for building the TypeSystem.
+    ///
+    /// Normally this is a single statement prepared from the fully-combined SQL
+    /// (all conditional blocks included at once). When the combined SQL cannot be
+    /// prepared because some conditional blocks are mutually exclusive (e.g.
+    /// alternative `ORDER BY ... LIMIT` branches), it instead holds one statement
+    /// per successfully prepared query variant so every parameter and output
+    /// column type is still captured.
+    pub statements: Vec<Statement>,
 }
 
 /// Represents a conditional block in a SQL query
@@ -162,6 +169,7 @@ pub struct ParsedSql {
 pub async fn extract_query_types(
     client: &tokio_postgres::Client,
     sql: &str,
+    sql_variants: &[(String, Vec<String>, String)],
     field_type_mappings: Option<&HashMap<String, String>>,
 ) -> Result<QueryTypeInfo> {
     // Strip non-null column cast syntax: {col!} and "col!" → clean col names.
@@ -177,29 +185,138 @@ pub async fn extract_query_types(
     // Convert named parameters to positional parameters for PostgreSQL
     let (converted_sql, param_names) = convert_named_params_to_positional(&full_sql);
 
-    let statement = client.prepare(&converted_sql).await.with_context(|| {
-        format!(
-            "Failed to prepare statement for type extraction: {}",
-            converted_sql
-        )
-    })?;
-
-    // Extract types
-    let input_types = extract_input_types(&statement, &param_names, field_type_mappings)?;
-    let output_types =
-        extract_output_types(&client, &statement, field_type_mappings, &non_null_columns).await?;
-
     let has_conditionals = !parsed_sql.conditional_blocks.is_empty();
+
+    // Fast path: prepare the fully-combined SQL (all conditional blocks included
+    // at once). This works whenever the blocks are additive — e.g. multiple `AND`
+    // predicates in a WHERE clause or multiple `SET` assignments in an UPDATE.
+    match client.prepare(&converted_sql).await {
+        Ok(statement) => {
+            let input_types = extract_input_types(&statement, &param_names, field_type_mappings)?;
+            let output_types =
+                extract_output_types(&client, &statement, field_type_mappings, &non_null_columns)
+                    .await?;
+
+            Ok(QueryTypeInfo {
+                input_types,
+                output_types,
+                parsed_sql: if has_conditionals {
+                    Some(parsed_sql)
+                } else {
+                    None
+                },
+                statements: vec![statement],
+            })
+        }
+        Err(combined_err) if has_conditionals => {
+            // The combined SQL is invalid because some conditional blocks are
+            // mutually exclusive (e.g. alternative `ORDER BY ... LIMIT` branches
+            // used for keyset pagination). Prepare each variant separately and
+            // merge the extracted parameter/output types.
+            extract_query_types_per_variant(
+                client,
+                sql_variants,
+                &clean_sql,
+                parsed_sql,
+                &non_null_columns,
+                field_type_mappings,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to prepare statement for type extraction (combined SQL was also \
+                     invalid: {}): {}",
+                    combined_err, converted_sql
+                )
+            })
+        }
+        Err(combined_err) => Err(combined_err).with_context(|| {
+            format!(
+                "Failed to prepare statement for type extraction: {}",
+                converted_sql
+            )
+        }),
+    }
+}
+
+/// Fallback type extraction for queries whose conditional blocks are mutually
+/// exclusive and therefore cannot be combined into a single valid statement.
+///
+/// Reuses the per-variant SQL already computed at parse time (`sql_variants`) —
+/// the same base + one-block-per-variant set that the EXPLAIN / performance
+/// analysis prepares — so no variant SQL is regenerated here. Each variant is
+/// prepared on its own; parameter types are collected by name across all
+/// variants and then re-ordered to match the parameters' source order in the
+/// original SQL, so downstream codegen — which indexes `input_types`
+/// positionally against the original SQL — keeps working unchanged.
+async fn extract_query_types_per_variant(
+    client: &tokio_postgres::Client,
+    sql_variants: &[(String, Vec<String>, String)],
+    clean_sql: &str,
+    parsed_sql: ParsedSql,
+    non_null_columns: &HashSet<String>,
+    field_type_mappings: Option<&HashMap<String, String>>,
+) -> Result<QueryTypeInfo> {
+    // Canonical source order of every parameter (suffixes preserved). Downstream
+    // codegen expects `input_types` to line up with this ordering.
+    let ordered_param_names = parse_parameter_names_from_sql(clean_sql);
+
+    let mut param_types: HashMap<String, InputParam> = HashMap::new();
+    let mut output_types: Vec<OutputColumn> = Vec::new();
+    let mut have_output = false;
+    let mut statements: Vec<Statement> = Vec::new();
+    let mut last_err: Option<anyhow::Error> = None;
+
+    // `sql_variants` is already positional SQL with matching parameter names
+    // (base variant first, then each conditional block in isolation).
+    for (converted, names, _label) in sql_variants {
+        let statement = match client.prepare(converted).await {
+            Ok(s) => s,
+            Err(e) => {
+                // A single mutually-exclusive branch may still be invalid on its
+                // own; remember the error but keep trying other variants.
+                last_err = Some(anyhow::anyhow!("{}", e));
+                continue;
+            }
+        };
+
+        let inputs = extract_input_types(&statement, names, field_type_mappings)?;
+        for (name, input) in names.iter().zip(inputs) {
+            param_types.entry(name.clone()).or_insert(input);
+        }
+
+        if !have_output {
+            let outputs =
+                extract_output_types(&client, &statement, field_type_mappings, non_null_columns)
+                    .await?;
+            if !outputs.is_empty() {
+                output_types = outputs;
+                have_output = true;
+            }
+        }
+
+        statements.push(statement);
+    }
+
+    if statements.is_empty() {
+        return Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!("No query variant could be prepared for type extraction")
+        }));
+    }
+
+    // Re-assemble input types in the original source order.
+    let mut input_types = Vec::with_capacity(ordered_param_names.len());
+    for name in &ordered_param_names {
+        if let Some(param) = param_types.get(name) {
+            input_types.push(param.clone());
+        }
+    }
 
     Ok(QueryTypeInfo {
         input_types,
         output_types,
-        parsed_sql: if has_conditionals {
-            Some(parsed_sql)
-        } else {
-            None
-        },
-        statement,
+        parsed_sql: Some(parsed_sql),
+        statements,
     })
 }
 

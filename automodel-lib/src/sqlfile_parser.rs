@@ -1,4 +1,5 @@
 use crate::query_definition::QueryDefinition;
+use crate::query_definition::{ChoiceGroup, ChoiceVariant};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::fs;
@@ -21,6 +22,377 @@ fn generate_query_variants(sql: &str) -> Vec<(String, String)> {
     }
 
     variants
+}
+
+/// Parse a selector directive `#{selector=variant!}` / `#{selector=variant?}`
+/// at the very start (after optional whitespace) of a conditional block's
+/// content. Returns `(selector, variant, required, directive_char_len)` where
+/// `directive_char_len` is the number of characters from the start of
+/// `block_content` up to and including the closing `}` (so callers can strip it).
+fn parse_selector_directive(block_content: &str) -> Option<(String, String, bool, usize)> {
+    let leading_ws: usize = block_content
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .count();
+    let rest: String = block_content.chars().skip(leading_ws).collect();
+    if !rest.starts_with("#{") {
+        return None;
+    }
+    // Find the closing '}' of the directive.
+    let inner_end = rest.find('}')?;
+    let inner = &rest[2..inner_end]; // between "#{" and "}"
+
+    // Must be of the form: IDENT '=' IDENT ('!' | '?')
+    let (body, required) = if let Some(stripped) = inner.strip_suffix('!') {
+        (stripped, true)
+    } else if let Some(stripped) = inner.strip_suffix('?') {
+        (stripped, false)
+    } else {
+        return None;
+    };
+    let (selector, variant) = body.split_once('=')?;
+    let selector = selector.trim();
+    let variant = variant.trim();
+    if selector.is_empty() || variant.is_empty() {
+        return None;
+    }
+    if !is_valid_rust_identifier(selector) || !is_valid_rust_identifier(variant) {
+        return None;
+    }
+
+    // Character length consumed: leading whitespace + the "#{...}" directive.
+    let directive_char_len = leading_ws + rest[..inner_end + 1].chars().count();
+    Some((
+        selector.to_string(),
+        variant.to_string(),
+        required,
+        directive_char_len,
+    ))
+}
+
+/// Scan the raw SQL for conditional blocks whose content begins with a selector
+/// directive `#{selector=variant!}` / `#{selector=variant?}`, extract the
+/// mutually-exclusive choice groups, and return the SQL with those directives
+/// stripped (so downstream variant generation, type extraction and parameter
+/// ordering never see the synthetic selector token).
+///
+/// Constraints (validated here):
+/// - a query may declare multiple independent choice groups (one enum each),
+///   distinguished by selector name;
+/// - all branches of a group must agree on the `!`/`?` optionality marker;
+/// - variant names within a group must be unique;
+/// - a parameter name may not be shared across two different choice groups.
+fn extract_choice_groups(sql: &str) -> Result<(String, Vec<ChoiceGroup>)> {
+    use std::collections::HashMap;
+    let mut cleaned = String::new();
+    // Preserve first-seen selector order so generated enum/argument order is stable.
+    let mut selector_order: Vec<String> = Vec::new();
+    let mut variants_by_selector: HashMap<String, Vec<ChoiceVariant>> = HashMap::new();
+    let mut required_by_selector: HashMap<String, bool> = HashMap::new();
+    let mut total_blocks = 0usize;
+
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            // Found start of a conditional block; capture its content honoring nesting.
+            let mut j = i + 2;
+            let mut bracket_count = 1;
+            let mut content = String::new();
+            while j < chars.len() && bracket_count > 0 {
+                match chars[j] {
+                    '[' => {
+                        bracket_count += 1;
+                        content.push('[');
+                    }
+                    ']' => {
+                        bracket_count -= 1;
+                        if bracket_count > 0 {
+                            content.push(']');
+                        }
+                    }
+                    c => content.push(c),
+                }
+                j += 1;
+            }
+
+            let this_block_index = total_blocks;
+            total_blocks += 1;
+
+            if let Some((selector, variant, required, directive_len)) =
+                parse_selector_directive(&content)
+            {
+                // Enforce consistent optionality marker within each selector.
+                match required_by_selector.get(&selector) {
+                    Some(existing) if *existing != required => {
+                        anyhow::bail!(
+                            "Choice-group selector '{}' has conflicting optionality markers \
+                             ('?' vs '!'); all branches must use the same marker",
+                            selector
+                        );
+                    }
+                    None => {
+                        required_by_selector.insert(selector.clone(), required);
+                        selector_order.push(selector.clone());
+                    }
+                    _ => {}
+                }
+                let group_variants = variants_by_selector.entry(selector.clone()).or_default();
+                if group_variants.iter().any(|v| v.variant == variant) {
+                    anyhow::bail!(
+                        "Choice-group selector '{}' declares duplicate variant '{}'",
+                        selector,
+                        variant
+                    );
+                }
+
+                // Strip the directive from the block content, keep the rest.
+                let stripped: String = content.chars().skip(directive_len).collect();
+                let params: Vec<String> =
+                    crate::types_extractor::parse_parameter_names_from_sql(&stripped)
+                        .into_iter()
+                        .map(|p| strip_param_suffix(&p))
+                        .collect();
+
+                group_variants.push(ChoiceVariant {
+                    variant,
+                    block_index: this_block_index,
+                    params,
+                });
+
+                // Emit the cleaned block (directive removed).
+                cleaned.push_str("#[");
+                cleaned.push_str(stripped.trim_start());
+                cleaned.push(']');
+            } else {
+                // Ungrouped conditional block — emit verbatim.
+                cleaned.push_str("#[");
+                cleaned.push_str(&content);
+                cleaned.push(']');
+            }
+
+            i = j;
+        } else {
+            cleaned.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    if selector_order.is_empty() {
+        return Ok((sql.to_string(), Vec::new()));
+    }
+
+    // A choice group may coexist with additive (ungrouped) conditional blocks,
+    // and its branches may carry any combination of parameters — including
+    // branches with no parameters at all (e.g. `#[#{sort=unsorted!} LIMIT 100]`).
+    // Multiple independent groups may also coexist (each becomes its own enum
+    // argument). The code generator numbers and binds branch parameters by
+    // source-order membership with per-name deduplication, so a parameter is
+    // handled correctly whether it appears in one branch (a per-variant field),
+    // some branches (a per-variant field on each), or every branch (a shared
+    // top-level argument).
+
+    // A parameter may not be shared across two different choice groups: the
+    // generator would number and bind it once while it survives in two separate
+    // branch blocks, producing an inconsistent statement. Reject it early.
+    let mut param_owner: HashMap<String, String> = HashMap::new();
+    for selector in &selector_order {
+        for variant in &variants_by_selector[selector] {
+            for param in &variant.params {
+                match param_owner.get(param) {
+                    Some(other) if other != selector => {
+                        anyhow::bail!(
+                            "Parameter '{}' is used by two different choice groups ('{}' and \
+                             '{}'); a parameter may belong to at most one choice group",
+                            param,
+                            other,
+                            selector
+                        );
+                    }
+                    _ => {
+                        param_owner.insert(param.clone(), selector.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let groups = selector_order
+        .into_iter()
+        .map(|selector| ChoiceGroup {
+            required: required_by_selector[&selector],
+            variants: variants_by_selector.remove(&selector).unwrap_or_default(),
+            selector,
+        })
+        .collect();
+    Ok((cleaned, groups))
+}
+
+/// Remove all SQL comments (`--` line comments and `/* ... */` block comments,
+/// including nested block comments) from `sql`.
+///
+/// Comment-like sequences are preserved when they appear inside single-quoted
+/// string literals, double-quoted identifiers, or dollar-quoted strings, so
+/// that legitimate SQL content is never corrupted. Everything else that looks
+/// like a comment is stripped, which makes the rest of the parsing pipeline
+/// (parameter scanning, conditional-block extraction, raw-string generation)
+/// immune to whatever a user writes in a comment.
+fn strip_sql_comments(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0usize;
+
+    while i < n {
+        let c = chars[i];
+
+        // Single-quoted string literal ('' is an escaped quote).
+        if c == '\'' {
+            out.push(c);
+            i += 1;
+            while i < n {
+                out.push(chars[i]);
+                if chars[i] == '\'' {
+                    if i + 1 < n && chars[i + 1] == '\'' {
+                        out.push(chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // Double-quoted identifier ("" is an escaped quote).
+        if c == '"' {
+            out.push(c);
+            i += 1;
+            while i < n {
+                out.push(chars[i]);
+                if chars[i] == '"' {
+                    if i + 1 < n && chars[i + 1] == '"' {
+                        out.push(chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // Dollar-quoted string: $tag$ ... $tag$ (tag may be empty).
+        if c == '$' {
+            if let Some(tag_len) = dollar_quote_tag_len(&chars, i) {
+                let tag: String = chars[i..i + tag_len].iter().collect();
+                out.push_str(&tag);
+                i += tag_len;
+                while i < n {
+                    if chars[i] == '$' && matches_at(&chars, i, &tag) {
+                        out.push_str(&tag);
+                        i += tag.chars().count();
+                        break;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        // Line comment: -- ... up to (but not including) the newline.
+        if c == '-' && i + 1 < n && chars[i + 1] == '-' {
+            i += 2;
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment: /* ... */ with Postgres-style nesting.
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            let mut depth = 1usize;
+            i += 2;
+            while i < n && depth > 0 {
+                if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            // Replace the whole comment with a single space to avoid merging tokens.
+            out.push(' ');
+            continue;
+        }
+
+        out.push(c);
+        i += 1;
+    }
+
+    out
+}
+
+/// If a dollar-quote opening tag begins at `pos`, return its length in `char`s
+/// (including both `$` delimiters). A tag is `$$` or `$ident$` where `ident`
+/// matches `[A-Za-z_][A-Za-z0-9_]*`. Returns `None` for e.g. positional
+/// placeholders like `$1`.
+fn dollar_quote_tag_len(chars: &[char], pos: usize) -> Option<usize> {
+    if chars.get(pos) != Some(&'$') {
+        return None;
+    }
+    match chars.get(pos + 1) {
+        Some('$') => Some(2),
+        Some(&c) if c.is_ascii_alphabetic() || c == '_' => {
+            let mut j = pos + 2;
+            while let Some(&c2) = chars.get(j) {
+                if c2.is_ascii_alphanumeric() || c2 == '_' {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if chars.get(j) == Some(&'$') {
+                Some(j + 1 - pos)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether the `char` slice starting at `pos` matches the literal `needle`.
+fn matches_at(chars: &[char], pos: usize, needle: &str) -> bool {
+    let needle_chars: Vec<char> = needle.chars().collect();
+    if pos + needle_chars.len() > chars.len() {
+        return false;
+    }
+    chars[pos..pos + needle_chars.len()] == needle_chars[..]
+}
+
+/// Strip parameter suffixes (`??[?]`, `?[?]`, `??`, `[?]`, `?`) from a raw name.
+fn strip_param_suffix(name: &str) -> String {
+    let s = if let Some(stripped) = name.strip_suffix("[?]") {
+        stripped
+    } else {
+        name
+    };
+    if let Some(stripped) = s.strip_suffix("??") {
+        stripped.to_string()
+    } else if let Some(stripped) = s.strip_suffix('?') {
+        stripped.to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Remove all conditional blocks #[...] from SQL
@@ -250,10 +622,9 @@ async fn parse_sql_file(
                 };
                 yaml_lines.push(yaml_content);
             }
-        } else if !trimmed.starts_with("--")
-            || trimmed.starts_with("-- ") && !trimmed.trim_start_matches("-- ").trim().is_empty()
-        {
-            // Include SQL lines (skip empty comment lines outside metadata)
+        } else {
+            // Everything outside the metadata block is SQL. Comments (including
+            // full-line ones) are stripped wholesale below via strip_sql_comments.
             sql_lines.push(line);
         }
     }
@@ -317,8 +688,16 @@ async fn parse_sql_file(
         })?
     };
 
-    // Combine SQL lines and trim
-    let sql_raw = sql_lines.join("\n").trim().to_string();
+    // Combine SQL lines, strip all SQL comments, then drop the blank lines that
+    // the removed comments leave behind, and trim.
+    let sql_stripped = strip_sql_comments(&sql_lines.join("\n"));
+    let sql_raw = sql_stripped
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
 
     // Keep raw SQL (with {col!} / "col!" syntax) — extract_query_types strips it at build time.
     let sql = sql_raw;
@@ -326,6 +705,11 @@ async fn parse_sql_file(
     if sql.is_empty() {
         anyhow::bail!("SQL file contains no SQL query for '{}'", name);
     }
+
+    // Extract mutually-exclusive choice groups (`#{selector=variant!}` directives)
+    // and strip those directives so all downstream processing sees clean SQL.
+    let (sql, choice_groups) = extract_choice_groups(&sql)
+        .with_context(|| format!("Failed to parse choice groups in query '{}'", name))?;
 
     // Generate SQL variants and convert to positional parameters at parse time.
     // Also strip non-null column cast syntax so runtime SQL is clean.
@@ -383,6 +767,7 @@ async fn parse_sql_file(
             derives.extend(metadata.error_type_derives);
             derives
         },
+        choice_groups,
     })
 }
 
@@ -481,4 +866,139 @@ pub async fn scan_sql_files(
     }
 
     Ok(queries)
+}
+
+#[cfg(test)]
+mod choice_group_tests {
+    use super::*;
+
+    // NOTE: Happy-path choice-group behavior (pure groups, optional groups,
+    // shared/per-variant/paramless branch parameters, and mixing with additive
+    // blocks) is exercised end-to-end against a real database by the example-app
+    // integration test `test_choice_groups.rs`, driven by the `.sql` files in
+    // `example-app/queries/choice_groups/`. The tests below cover parser-only
+    // invariants and the invalid inputs that must be rejected at build time
+    // (which therefore cannot live in the example-app query set).
+
+    #[test]
+    fn no_directives_yields_no_groups() {
+        let sql = "SELECT id FROM t WHERE 1 = 1 #[AND id = #{x?}]";
+        let (cleaned, groups) = extract_choice_groups(sql).unwrap();
+        assert!(groups.is_empty());
+        assert_eq!(cleaned, sql);
+    }
+
+    #[test]
+    fn conflicting_markers_error() {
+        let sql = include_str!("../tests/fixtures/choice_groups/invalid_conflicting_markers.sql");
+        let err = extract_choice_groups(sql).unwrap_err().to_string();
+        assert!(err.contains("conflicting optionality markers"), "{}", err);
+    }
+
+    #[test]
+    fn multiple_independent_groups_parse_separately() {
+        // Two distinct selectors with no shared parameters form two independent
+        // choice groups, preserving first-seen selector order.
+        let sql = "SELECT 1\n#[#{s=a!} ORDER BY a]\n#[#{t=b!} ORDER BY b]";
+        let (_, groups) = extract_choice_groups(sql).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].selector, "s");
+        assert_eq!(groups[1].selector, "t");
+        assert_eq!(groups[0].variants[0].variant, "a");
+        assert_eq!(groups[1].variants[0].variant, "b");
+    }
+
+    #[test]
+    fn cross_group_shared_param_errors() {
+        let sql =
+            include_str!("../tests/fixtures/choice_groups/invalid_cross_group_shared_param.sql");
+        let err = extract_choice_groups(sql).unwrap_err().to_string();
+        assert!(err.contains("two different choice groups"), "{}", err);
+    }
+
+    #[test]
+    fn duplicate_variant_errors() {
+        let sql = include_str!("../tests/fixtures/choice_groups/invalid_duplicate_variant.sql");
+        let err = extract_choice_groups(sql).unwrap_err().to_string();
+        assert!(err.contains("duplicate variant"), "{}", err);
+    }
+}
+
+#[cfg(test)]
+mod comment_stripping_tests {
+    use super::*;
+
+    #[test]
+    fn strips_full_line_comments() {
+        let sql = "SELECT id\n-- a comment\nFROM t";
+        assert_eq!(strip_sql_comments(sql), "SELECT id\n\nFROM t");
+    }
+
+    #[test]
+    fn strips_trailing_line_comment() {
+        let sql = "SELECT id -- trailing\nFROM t";
+        assert_eq!(strip_sql_comments(sql), "SELECT id \nFROM t");
+    }
+
+    #[test]
+    fn strips_block_comment() {
+        let sql = "SELECT /* inline */ id FROM t";
+        assert_eq!(strip_sql_comments(sql), "SELECT   id FROM t");
+    }
+
+    #[test]
+    fn strips_nested_block_comment() {
+        let sql = "SELECT /* a /* nested */ b */ id";
+        assert_eq!(strip_sql_comments(sql), "SELECT   id");
+    }
+
+    #[test]
+    fn preserves_double_dash_inside_string_literal() {
+        let sql = "SELECT '-- not a comment' AS x";
+        assert_eq!(strip_sql_comments(sql), sql);
+    }
+
+    #[test]
+    fn preserves_block_marker_inside_string_literal() {
+        let sql = "SELECT '/* keep */' AS x";
+        assert_eq!(strip_sql_comments(sql), sql);
+    }
+
+    #[test]
+    fn preserves_comment_chars_inside_quoted_identifier() {
+        let sql = "SELECT \"weird--col\" FROM t";
+        assert_eq!(strip_sql_comments(sql), sql);
+    }
+
+    #[test]
+    fn preserves_comment_chars_inside_dollar_quote() {
+        let sql = "SELECT $$ a -- b /* c */ $$ AS x";
+        assert_eq!(strip_sql_comments(sql), sql);
+    }
+
+    #[test]
+    fn preserves_comment_chars_inside_tagged_dollar_quote() {
+        let sql = "SELECT $tag$ -- not stripped $tag$ AS x";
+        assert_eq!(strip_sql_comments(sql), sql);
+    }
+
+    #[test]
+    fn does_not_treat_positional_placeholder_as_dollar_quote() {
+        let sql = "SELECT id FROM t WHERE a = $1 -- c\nAND b = $2";
+        assert_eq!(
+            strip_sql_comments(sql),
+            "SELECT id FROM t WHERE a = $1 \nAND b = $2"
+        );
+    }
+
+    #[test]
+    fn keeps_conditional_and_named_params_but_drops_comment_versions() {
+        // A comment containing #{...}, #[...] and a lone double-quote must not
+        // leak into the stripped SQL.
+        let sql =
+            "SELECT id FROM t\n-- danger: #{ghost?} #[block] and a \" quote\n#[AND id = #{x?}]";
+        let out = strip_sql_comments(sql);
+        assert!(!out.contains("ghost"), "{}", out);
+        assert!(out.contains("#[AND id = #{x?}]"), "{}", out);
+    }
 }

@@ -445,12 +445,13 @@ impl AutoModel {
         let mut type_system = rust_type::TypeSystem::new();
 
         for query in analyzed_queries {
-            let statement = &query.type_info.statement;
-            for param_type in statement.params() {
-                let _ = type_system.insert(param_type);
-            }
-            for column in statement.columns() {
-                let _ = type_system.insert(column.type_());
+            for statement in &query.type_info.statements {
+                for param_type in statement.params() {
+                    let _ = type_system.insert(param_type);
+                }
+                for column in statement.columns() {
+                    let _ = type_system.insert(column.type_());
+                }
             }
         }
 
@@ -577,8 +578,13 @@ impl AutoModel {
                 println!("cargo:info=Analyzing query '{}'", query.name);
 
                 // Extract type information (captures Statement for later TypeSystem building)
-                let type_info =
-                    extract_query_types(client, &query.sql, query.types.as_ref()).await?;
+                let type_info = extract_query_types(
+                    client,
+                    &query.sql,
+                    &query.sql_variants,
+                    query.types.as_ref(),
+                )
+                .await?;
 
                 // Analyze query with EXPLAIN to detect mutation and optionally get performance data
                 // EXPLAIN fails on mutations (INSERT/UPDATE/DELETE), so we use that to detect them

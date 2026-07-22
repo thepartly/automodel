@@ -5,8 +5,9 @@ mod models;
 use std::env;
 
 fn main() {
-    let database_url = env::var("AUTOMODEL_DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:password@localhost:55432/postgres".to_string());
+    let database_url = env::var("AUTOMODEL_DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:password@automodel-testdb:5432/postgres".to_string()
+    });
 
     println!("example-app compiled successfully");
     println!("All generated modules are valid.");
