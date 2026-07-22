@@ -2448,9 +2448,10 @@ pub enum SearchUsersFilteredSort {
 /// 
 /// === search_users_filtered (variant 9) ===
 /// Bitmap Heap Scan on users
-///   Filter: ((id >= 0) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)))
-///   ->  Bitmap Index Scan on idx_users_updated_at
-///         Index Cond: (updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
+///   Recheck Cond: (id >= 0)
+///   Filter: (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
+///   ->  Bitmap Index Scan on users_pkey
+///         Index Cond: (id >= 0)
 /// 
 /// === search_users_filtered (variant 10) ===
 /// Index Scan using idx_users_updated_at on users
