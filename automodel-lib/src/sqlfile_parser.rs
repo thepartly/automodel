@@ -695,26 +695,43 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
-/// Auto-quote a single-line `description:` value in the metadata YAML so free
-/// text can contain YAML-significant characters (notably `": "`, which would
-/// otherwise be read as a nested mapping and abort parsing).
+/// Auto-quote a `description:` value in the metadata YAML so free text can
+/// contain YAML-significant characters (notably `": "`, which would otherwise
+/// be read as a nested mapping and abort parsing).
 ///
-/// Only a plain (unquoted, non-block) single-line value is rewritten; values
-/// that are already quoted (`"`/`'`) or block scalars (`|`/`>`) are left
-/// untouched, as is a `description:` with no inline value.
+/// A plain (unquoted, non-block) value is rewritten into a single double-quoted
+/// scalar. Multi-line plain scalars — where the value continues on subsequent
+/// lines indented more deeply than the `description:` key — are folded (per YAML
+/// line-folding rules) into that one quoted line, so quoting the first line does
+/// not orphan the continuation lines. Values that are already quoted (`"`/`'`)
+/// or block scalars (`|`/`>`) are left untouched, as is a `description:` with no
+/// inline value.
 fn quote_plain_description(yaml: &str) -> String {
-    yaml.lines()
-        .map(|line| quote_plain_description_line(line).unwrap_or_else(|| line.to_string()))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let lines: Vec<&str> = yaml.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some((quoted, consumed)) = quote_plain_description_at(&lines, i) {
+            out.push(quoted);
+            i += consumed;
+        } else {
+            out.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+    out.join("\n")
 }
 
-fn quote_plain_description_line(line: &str) -> Option<String> {
+/// Attempt to rewrite the `description:` entry starting at `lines[start]`.
+/// Returns `(quoted_line, lines_consumed)` on success, where `lines_consumed`
+/// covers the key line plus any folded continuation lines.
+fn quote_plain_description_at(lines: &[&str], start: usize) -> Option<(String, usize)> {
+    let line = lines[start];
     let indent_len = line.len() - line.trim_start().len();
     let (indent, rest) = line.split_at(indent_len);
     let value = rest.strip_prefix("description:")?;
     let value = value.trim();
-    // Empty (multi-line form) or already quoted / a block scalar: leave as-is.
+    // Empty (multi-line block form) or already quoted / a block scalar: leave as-is.
     if value.is_empty()
         || value.starts_with('"')
         || value.starts_with('\'')
@@ -723,8 +740,25 @@ fn quote_plain_description_line(line: &str) -> Option<String> {
     {
         return None;
     }
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    Some(format!("{indent}description: \"{escaped}\""))
+
+    // Fold continuation lines: a plain multi-line scalar continues on lines
+    // indented more deeply than the key, stopping at the first blank line or a
+    // line at the same-or-shallower indentation (the next mapping key).
+    let mut folded = value.to_string();
+    let mut consumed = 1;
+    for next in &lines[start + 1..] {
+        let next_indent = next.len() - next.trim_start().len();
+        let trimmed = next.trim();
+        if trimmed.is_empty() || next_indent <= indent_len {
+            break;
+        }
+        folded.push(' ');
+        folded.push_str(trimmed);
+        consumed += 1;
+    }
+
+    let escaped = folded.replace('\\', "\\\\").replace('"', "\\\"");
+    Some((format!("{indent}description: \"{escaped}\""), consumed))
 }
 
 /// Parse SQL file with embedded YAML metadata in comments
@@ -1127,6 +1161,33 @@ mod description_quoting_tests {
     fn ignores_non_description_keys() {
         let yaml = "return_type: SomeRow\nexpect: multiple";
         assert_eq!(quote_plain_description(yaml), yaml);
+    }
+
+    #[test]
+    fn folds_multiline_plain_description() {
+        let yaml = "description: Hard-delete a single part row by its primary key. Returns the id\n  if found. Child rows carry no foreign key, so the app clears them separately.\n  TODO restore ON DELETE CASCADE once the ingestor is retired.\nexpect: possible_one\ntypes:\n  brand_id: \"suid_rs::GapcBrandSuid@native\"";
+        let quoted = quote_plain_description(yaml);
+        let value: serde_yaml::Value = serde_yaml::from_str(&quoted).unwrap();
+        assert_eq!(
+            value["description"],
+            "Hard-delete a single part row by its primary key. Returns the id \
+             if found. Child rows carry no foreign key, so the app clears them separately. \
+             TODO restore ON DELETE CASCADE once the ingestor is retired."
+        );
+        assert_eq!(value["expect"], "possible_one");
+        assert_eq!(value["types"]["brand_id"], "suid_rs::GapcBrandSuid@native");
+    }
+
+    #[test]
+    fn folds_multiline_plain_description_with_colon() {
+        // A continuation line containing ": " would break native YAML folding;
+        // quoting the whole scalar keeps it a single string.
+        let yaml =
+            "description: first line\n  second line: with a colon\nexpect: multiple";
+        let quoted = quote_plain_description(yaml);
+        let value: serde_yaml::Value = serde_yaml::from_str(&quoted).unwrap();
+        assert_eq!(value["description"], "first line second line: with a colon");
+        assert_eq!(value["expect"], "multiple");
     }
 }
 
