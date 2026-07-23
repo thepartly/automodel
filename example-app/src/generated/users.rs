@@ -2494,23 +2494,23 @@ WHERE id >= $1
             final_sql = final_sql.replace(r"#[LIMIT 100]", r"LIMIT 100");
         }
         SearchUsersFilteredSort::UaAsc { limit } => {
-            limit_cg = Some(limit);
             final_sql = final_sql.replace(r"#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]", r"ORDER BY updated_at ASC, id ASC LIMIT #{limit?}");
+            limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersFilteredSort::UaDesc { limit } => {
-            limit_cg = Some(limit);
             final_sql = final_sql.replace(r"#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]", r"ORDER BY updated_at DESC, id DESC LIMIT #{limit?}");
+            limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersFilteredSort::NameAsc { limit } => {
-            limit_cg = Some(limit);
             final_sql = final_sql.replace(r"#[ORDER BY name ASC, id ASC LIMIT #{limit?}]", r"ORDER BY name ASC, id ASC LIMIT #{limit?}");
+            limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersFilteredSort::NameDesc { limit } => {
-            limit_cg = Some(limit);
             final_sql = final_sql.replace(r"#[ORDER BY name DESC, id DESC LIMIT #{limit?}]", r"ORDER BY name DESC, id DESC LIMIT #{limit?}");
+            limit_cg = Some(limit);
             included_params.push("limit");
         }
     }

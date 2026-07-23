@@ -1068,6 +1068,15 @@ fn choice_group_is_mixed(query: &QueryDefinition, type_info: &QueryTypeInfo) -> 
     if query.choice_groups.len() > 1 {
         return true;
     }
+    // Any nested optional block (Option B) requires runtime include/exclude of a
+    // sub-portion of a branch, which only the membership-based generator does.
+    if query
+        .choice_groups
+        .iter()
+        .any(|g| g.variants.iter().any(|v| !v.nested_blocks.is_empty()))
+    {
+        return true;
+    }
     let total_blocks = type_info
         .parsed_sql
         .as_ref()
@@ -1121,7 +1130,7 @@ fn choice_group_arg_names(query: &QueryDefinition, type_info: &QueryTypeInfo) ->
     for group in &query.choice_groups {
         selectors.insert(group.selector.clone());
         for v in &group.variants {
-            grouped.extend(v.params.iter().cloned());
+            grouped.extend(v.all_params());
         }
     }
     let clean_names: Vec<String> = parse_parameter_names_from_sql(&query.sql)
@@ -1155,13 +1164,20 @@ fn generate_choice_group_enum_defs(query: &QueryDefinition, type_info: &QueryTyp
         code.push_str("#[derive(Debug, Clone)]\n");
         code.push_str(&format!("pub enum {} {{\n", enum_name));
         for variant in &group.variants {
-            // Variant fields = every parameter in this branch (deduplicated).
+            // Every parameter in this branch is a field: direct params are
+            // mandatory (`T`); nested optional-block params (Option B) are
+            // `Option<T>` (their presence gates the nested clause at runtime).
+            let nested: std::collections::HashSet<String> = variant
+                .nested_blocks
+                .iter()
+                .flat_map(|nb| nb.params.iter().cloned())
+                .collect();
             let mut fields: Vec<String> = Vec::new();
-            for p in &variant.params {
-                if fields.contains(p) {
+            for p in variant.all_params() {
+                if fields.contains(&p) {
                     continue;
                 }
-                fields.push(p.clone());
+                fields.push(p);
             }
             let pascal = to_pascal_case(&variant.variant);
             if fields.is_empty() {
@@ -1169,10 +1185,15 @@ fn generate_choice_group_enum_defs(query: &QueryDefinition, type_info: &QueryTyp
             } else {
                 code.push_str(&format!("    {} {{\n", pascal));
                 for f in &fields {
-                    let ty = type_map
+                    let base_ty = type_map
                         .get(f)
                         .map(|ip| ip.rust_type().to_string())
                         .unwrap_or_else(|| "String".to_string());
+                    let ty = if nested.contains(f) {
+                        format!("Option<{}>", base_ty)
+                    } else {
+                        base_ty
+                    };
                     code.push_str(&format!("        {}: {},\n", f, ty));
                 }
                 code.push_str("    },\n");
@@ -1195,7 +1216,7 @@ fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTyp
     for group in &query.choice_groups {
         selectors.insert(group.selector.clone());
         for v in &group.variants {
-            grouped.extend(v.params.iter().cloned());
+            grouped.extend(v.all_params());
         }
     }
 
@@ -1276,18 +1297,14 @@ fn push_choice_bind(
 
 /// Build a match arm pattern for a variant, destructuring all of its parameters
 /// (variant fields).
-fn choice_variant_pattern(
-    enum_name: &str,
-    variant: &ChoiceVariant,
-    bind_fields: bool,
-) -> String {
+fn choice_variant_pattern(enum_name: &str, variant: &ChoiceVariant, bind_fields: bool) -> String {
     let pascal = to_pascal_case(&variant.variant);
     let mut fields: Vec<String> = Vec::new();
-    for p in &variant.params {
-        if fields.contains(p) {
+    for p in variant.all_params() {
+        if fields.contains(&p) {
             continue;
         }
-        fields.push(p.clone());
+        fields.push(p);
     }
     if fields.is_empty() {
         format!("{}::{}", enum_name, pascal)
@@ -1307,11 +1324,8 @@ fn generate_choice_group_function_body(
 ) -> Result<()> {
     let group = &query.choice_groups[0];
     let type_map = choice_group_type_map(query, type_info);
-    let grouped: std::collections::HashSet<String> = group
-        .variants
-        .iter()
-        .flat_map(|v| v.params.iter().cloned())
-        .collect();
+    let grouped: std::collections::HashSet<String> =
+        group.variants.iter().flat_map(|v| v.all_params()).collect();
     let enum_name = choice_group_enum_name(&query.name, &group.selector);
     let selector = &group.selector;
 
@@ -1443,11 +1457,12 @@ fn generate_mixed_choice_conditional_body(
         .iter()
         .flat_map(|g| g.variants.iter().map(|v| v.block_index))
         .collect();
-    // Every grouped-branch parameter across all groups (clean names).
+    // Every grouped-branch parameter across all groups (clean names), including
+    // nested optional-block params (Option B).
     let grouped_fields: std::collections::HashSet<String> = query
         .choice_groups
         .iter()
-        .flat_map(|g| g.variants.iter().flat_map(|v| v.params.iter().cloned()))
+        .flat_map(|g| g.variants.iter().flat_map(|v| v.all_params()))
         .collect();
 
     // Resolve the `InputParam` for a clean parameter name via source order.
@@ -1514,8 +1529,8 @@ fn generate_mixed_choice_conditional_body(
     let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
     for group in &query.choice_groups {
         for variant in &group.variants {
-            for p in &variant.params {
-                let clean = strip_input_suffix(p);
+            for p in variant.all_params() {
+                let clean = strip_input_suffix(&p);
                 if !declared.insert(clean.clone()) {
                     continue;
                 }
@@ -1537,13 +1552,21 @@ fn generate_mixed_choice_conditional_body(
         body.push_str(&format!("    match &{} {{\n", selector));
         for variant in &group.variants {
             let pascal = to_pascal_case(&variant.variant);
+            // Destructure every field of the branch (direct + nested).
             let mut fields: Vec<String> = Vec::new();
-            for p in &variant.params {
-                let clean = strip_input_suffix(p);
+            for p in variant.all_params() {
+                let clean = strip_input_suffix(&p);
                 if !fields.contains(&clean) {
                     fields.push(clean);
                 }
             }
+            // Direct (mandatory) params are active as soon as the branch is chosen;
+            // nested-block params are gated separately below.
+            let direct: std::collections::HashSet<String> = variant
+                .params
+                .iter()
+                .map(|p| strip_input_suffix(p))
+                .collect();
             let pattern = if fields.is_empty() {
                 format!("{}::{}", enum_name, pascal)
             } else {
@@ -1555,9 +1578,8 @@ fn generate_mixed_choice_conditional_body(
                 format!("Some({})", pattern)
             };
             body.push_str(&format!("        {} => {{\n", arm_pat));
-            for f in &fields {
-                body.push_str(&format!("            {}_cg = Some({});\n", f, f));
-            }
+            // Include the branch's SQL (its content may still contain nested
+            // `#[...]` markers, resolved next).
             let block = &parsed_sql.conditional_blocks[variant.block_index];
             let conditional_block = format!("#[{}]", block.sql_content);
             body.push_str(&format!(
@@ -1565,11 +1587,39 @@ fn generate_mixed_choice_conditional_body(
                 conditional_block,
                 &conditional_block[2..conditional_block.len() - 1]
             ));
-            for param_name in &block.parameters {
+            // Direct fields: stage the reference and mark included unconditionally.
+            for f in &fields {
+                if direct.contains(f) {
+                    body.push_str(&format!("            {}_cg = Some({});\n", f, f));
+                    body.push_str(&format!("            included_params.push(\"{}\");\n", f));
+                }
+            }
+            // Nested optional blocks (Option B): include only when the gate field
+            // (first param) is `Some`; then stage each field and mark it included.
+            for nb in &variant.nested_blocks {
+                if nb.params.is_empty() {
+                    continue;
+                }
+                let gate = &nb.params[0];
+                let inner_marker = format!("#[{}]", nb.sql_content);
+                body.push_str(&format!("            if {}.is_some() {{\n", gate));
                 body.push_str(&format!(
-                    "            included_params.push(\"{}\");\n",
-                    param_name.trim_end_matches('?')
+                    "                final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
+                    inner_marker, nb.sql_content
                 ));
+                for p in &nb.params {
+                    body.push_str(&format!("                {}_cg = {}.as_ref();\n", p, p));
+                    body.push_str(&format!(
+                        "                included_params.push(\"{}\");\n",
+                        p
+                    ));
+                }
+                body.push_str("            } else {\n");
+                body.push_str(&format!(
+                    "                final_sql = final_sql.replace(r\"{}\", \"\");\n",
+                    inner_marker
+                ));
+                body.push_str("            }\n");
             }
             body.push_str("        }\n");
         }

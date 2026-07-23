@@ -1,5 +1,5 @@
 use crate::query_definition::QueryDefinition;
-use crate::query_definition::{ChoiceGroup, ChoiceVariant};
+use crate::query_definition::{ChoiceGroup, ChoiceVariant, NestedChoiceBlock};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::fs;
@@ -68,6 +68,63 @@ fn parse_selector_directive(block_content: &str) -> Option<(String, String, bool
         required,
         directive_char_len,
     ))
+}
+
+/// Split a choice-variant block's content (the text between its outer `#[` `]`,
+/// with the selector directive already removed) into its direct parameters and
+/// any nested optional `#[...]` blocks (Option B). Direct parameters are those
+/// referenced outside every nested block and become mandatory variant fields;
+/// each nested block records its exact inner content (so codegen string
+/// replacement matches the base SQL) plus its parameters, which become
+/// `Option<T>` variant fields.
+fn split_choice_variant_content(content: &str) -> (Vec<String>, Vec<NestedChoiceBlock>) {
+    let chars: Vec<char> = content.chars().collect();
+    let mut nested_blocks: Vec<NestedChoiceBlock> = Vec::new();
+    let mut direct_text = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            // Capture a nested block honoring any further nesting inside it.
+            let mut j = i + 2;
+            let mut depth = 1;
+            let mut inner = String::new();
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '[' => {
+                        depth += 1;
+                        inner.push('[');
+                    }
+                    ']' => {
+                        depth -= 1;
+                        if depth > 0 {
+                            inner.push(']');
+                        }
+                    }
+                    c => inner.push(c),
+                }
+                j += 1;
+            }
+            let params: Vec<String> =
+                crate::types_extractor::parse_parameter_names_from_sql(&inner)
+                    .into_iter()
+                    .map(|p| strip_param_suffix(&p))
+                    .collect();
+            nested_blocks.push(NestedChoiceBlock {
+                sql_content: inner,
+                params,
+            });
+            i = j;
+        } else {
+            direct_text.push(chars[i]);
+            i += 1;
+        }
+    }
+    let direct_params: Vec<String> =
+        crate::types_extractor::parse_parameter_names_from_sql(&direct_text)
+            .into_iter()
+            .map(|p| strip_param_suffix(&p))
+            .collect();
+    (direct_params, nested_blocks)
 }
 
 /// Scan the raw SQL for conditional blocks whose content begins with a selector
@@ -148,21 +205,23 @@ fn extract_choice_groups(sql: &str) -> Result<(String, Vec<ChoiceGroup>)> {
 
                 // Strip the directive from the block content, keep the rest.
                 let stripped: String = content.chars().skip(directive_len).collect();
-                let params: Vec<String> =
-                    crate::types_extractor::parse_parameter_names_from_sql(&stripped)
-                        .into_iter()
-                        .map(|p| strip_param_suffix(&p))
-                        .collect();
+                // The exact text that will sit between the outer `#[` `]` in the
+                // cleaned SQL; nested `#[...]` blocks (Option B) are split out of
+                // it so their parameters become optional per-variant fields while
+                // the direct parameters become mandatory fields.
+                let emitted = stripped.trim_start().to_string();
+                let (params, nested_blocks) = split_choice_variant_content(&emitted);
 
                 group_variants.push(ChoiceVariant {
                     variant,
                     block_index: this_block_index,
                     params,
+                    nested_blocks,
                 });
 
                 // Emit the cleaned block (directive removed).
                 cleaned.push_str("#[");
-                cleaned.push_str(stripped.trim_start());
+                cleaned.push_str(&emitted);
                 cleaned.push(']');
             } else {
                 // Ungrouped conditional block — emit verbatim.
@@ -198,8 +257,8 @@ fn extract_choice_groups(sql: &str) -> Result<(String, Vec<ChoiceGroup>)> {
     let mut param_owner: HashMap<String, String> = HashMap::new();
     for selector in &selector_order {
         for variant in &variants_by_selector[selector] {
-            for param in &variant.params {
-                match param_owner.get(param) {
+            for param in variant.all_params() {
+                match param_owner.get(&param) {
                     Some(other) if other != selector => {
                         anyhow::bail!(
                             "Parameter '{}' is used by two different choice groups ('{}' and \
@@ -395,17 +454,29 @@ fn strip_param_suffix(name: &str) -> String {
     }
 }
 
-/// Remove all conditional blocks #[...] from SQL
+/// Remove all conditional blocks #[...] from SQL (bracket-aware so that nested
+/// `#[...]` blocks are removed together with their enclosing block).
 fn remove_conditional_blocks(sql: &str) -> String {
-    let mut result = sql.to_string();
-
-    // Remove #[...] blocks using simple string replacement
-    while let Some(start) = result.find("#[") {
-        if let Some(end) = result[start..].find("]") {
-            let end_pos = start + end + 1;
-            result.replace_range(start..end_pos, "");
+    let chars: Vec<char> = sql.chars().collect();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            // Skip the whole block honoring nesting.
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            i = j;
         } else {
-            break;
+            result.push(chars[i]);
+            i += 1;
         }
     }
 
@@ -414,31 +485,83 @@ fn remove_conditional_blocks(sql: &str) -> String {
     result
 }
 
+/// Strip the outermost pair of a nested `#[...]` marker sequence, keeping the
+/// inner content. Repeated application inlines every nested block. Used to build
+/// a valid "fully included" isolated variant for EXPLAIN/type extraction.
+fn inline_nested_markers(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            // Keep the inner content, drop the `#[` and its matching `]`.
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '[' => {
+                        depth += 1;
+                        result.push('[');
+                    }
+                    ']' => {
+                        depth -= 1;
+                        if depth > 0 {
+                            result.push(']');
+                        }
+                    }
+                    c => result.push(c),
+                }
+                j += 1;
+            }
+            i = j;
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Extract variants where each conditional block is included
 fn extract_conditional_variants(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
     let mut variants = Vec::new();
-    let mut pos = 0;
+    let mut i = 0usize;
 
-    while let Some(start) = sql[pos..].find("#[") {
-        let start_pos = pos + start;
-        if let Some(end) = sql[start_pos..].find("]") {
-            let end_pos = start_pos + end + 1;
-            let conditional_content = &sql[start_pos + 2..end_pos - 1]; // Remove #[ and ]
+    while i < chars.len() {
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            // Locate the matching closing bracket for this (possibly nested) block.
+            let start_pos = i;
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end_pos = j; // one past the matching ']'
+            let conditional_content: String = chars[start_pos + 2..end_pos - 1].iter().collect();
 
-            // Create variant with this conditional block included
-            let mut variant = sql.to_string();
-            variant.replace_range(start_pos..end_pos, conditional_content);
-
-            // Remove any remaining conditional blocks from this variant
+            // Create variant with this conditional block included, then remove
+            // all remaining (other) conditional blocks and inline any nested
+            // markers left inside the included block so the result is valid SQL.
+            let mut variant: String = chars[..start_pos].iter().collect();
+            variant.push_str(&conditional_content);
+            let tail: String = chars[end_pos..].iter().collect();
+            variant.push_str(&tail);
             variant = remove_conditional_blocks(&variant);
+            variant = inline_nested_markers(&variant);
 
             if !variant.trim().is_empty() {
                 variants.push(variant);
             }
 
-            pos = end_pos;
+            i = end_pos;
         } else {
-            break;
+            i += 1;
         }
     }
 

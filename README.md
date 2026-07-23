@@ -559,6 +559,7 @@ let page = get_users_multi_sort_cursor(
 
 - A query may declare **multiple independent choice groups** (see below); each distinct selector name becomes its own enum argument.
 - A choice group may **coexist with additive `#[...]` blocks** in the same query (see below); blocks without a directive keep their additive `Option<T>` behavior.
+- A branch may contain **nested additive `#[...]` blocks** (see below); their parameters become `Option<T>` fields, included only when `Some(...)`.
 - All branches of a group must use the **same** optionality marker (`!` or `?`).
 - Variant names within a group must be unique.
 - A parameter may belong to **at most one** choice group (it cannot be shared across two different groups).
@@ -626,6 +627,58 @@ pub async fn multi_group_search(
 ```
 
 The only restriction is that a given parameter name may not be shared between two different groups, since the generator numbers and binds each parameter exactly once.
+
+#### Nested optional blocks inside a branch
+
+A choice branch may contain **nested additive `#[...]` blocks**. The branch itself is still selected by the enum, but each nested block is included only when its parameter is `Some(...)` — exactly like a top-level additive block, just scoped to the chosen variant. Nested-block parameters become **`Option<T>` fields** on the variant, while the branch's direct parameters stay plain (non-`Option`) fields.
+
+This is ideal for **keyset pagination where the first page has no cursor** but later pages do: expose the cursor bounds as nested optional fields, so `None` yields the first page (no keyset predicate) and `Some` yields the filtered next page — all from a single source line per sort mode:
+
+```sql
+SELECT id, name, email, updated_at
+FROM users
+WHERE name LIKE #{name_prefix}
+  #[#{sort=name_asc?}  #[AND (name, id) > (#{cur_val?}, #{cur_id?})] ORDER BY name ASC,  id ASC]
+  #[#{sort=name_desc?} #[AND (name, id) < (#{cur_val?}, #{cur_id?})] ORDER BY name DESC, id DESC]
+LIMIT #{lim};
+```
+
+Each variant carries its cursor bounds as `Option<T>` fields:
+
+```rust
+pub enum PageUsersSort {
+    NameAsc  { cur_val: Option<String>, cur_id: Option<i32> },
+    NameDesc { cur_val: Option<String>, cur_id: Option<i32> },
+}
+
+// First page: no cursor -> keyset predicate omitted.
+let first = page_users(pool, prefix.clone(), 20,
+    Some(PageUsersSort::NameAsc { cur_val: None, cur_id: None })).await?;
+
+// Next page: pass the last row of the previous page as the cursor.
+let last = first.last().unwrap();
+let next = page_users(pool, prefix, 20,
+    Some(PageUsersSort::NameAsc { cur_val: Some(last.name.clone()), cur_id: Some(last.id) })).await?;
+```
+
+A single branch may hold **several independent nested blocks**, and nested blocks can be freely combined with mandatory direct parameters in the same branch:
+
+```sql
+SELECT id, name, email, age, is_active FROM users
+WHERE name LIKE #{name_prefix}
+  #[#{filter=by_active!} AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]
+  #[#{filter=by_age!}    AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]
+LIMIT #{lim};
+```
+
+```rust
+pub enum FilterUsersFilter {
+    ByActive { want_active: bool, active_min_age: Option<i32> },  // direct + nested
+    ByAge    { floor_age: i32,   ceil_age: Option<i32> },         // direct + nested
+}
+```
+
+Here `want_active` / `floor_age` are always bound (plain fields), while `active_min_age` / `ceil_age` gate their nested predicate and are only applied when `Some(...)`.
 
 ### Non-Null Column Override
 

@@ -204,8 +204,41 @@ pub(crate) struct ChoiceVariant {
     /// pre-computed SQL lives at `QueryDefinition::sql_variants[block_index + 1]`
     /// (index 0 is the base variant with all blocks removed).
     pub block_index: usize,
-    /// Clean parameter names (suffixes stripped) referenced in this branch, in
-    /// source order, excluding the selector directive itself.
+    /// Clean parameter names (suffixes stripped) referenced *directly* in this
+    /// branch (outside any nested optional block), in source order, excluding the
+    /// selector directive itself. These become mandatory (non-`Option`) enum
+    /// variant fields.
+    pub params: Vec<String>,
+    /// Nested optional `#[...]` blocks declared inside this branch (Option B).
+    /// Each nested block is included at runtime only when its gate parameter is
+    /// `Some`, so its parameters become `Option<T>` enum variant fields. Empty
+    /// for ordinary branches.
+    pub nested_blocks: Vec<NestedChoiceBlock>,
+}
+
+impl ChoiceVariant {
+    /// All clean parameter names referenced anywhere in this branch (direct
+    /// fields first, then nested-block fields), in source order.
+    pub fn all_params(&self) -> Vec<String> {
+        let mut out = self.params.clone();
+        for nb in &self.nested_blocks {
+            out.extend(nb.params.iter().cloned());
+        }
+        out
+    }
+}
+
+/// A nested optional conditional block declared inside a choice-group branch
+/// (Option B keyset-pagination pattern). At runtime it is included only when its
+/// gate parameter (`params[0]`) is `Some`, mirroring ordinary additive `#[...]`
+/// blocks; its parameters therefore surface as `Option<T>` fields on the branch.
+#[derive(Debug, Clone)]
+pub(crate) struct NestedChoiceBlock {
+    /// The inner SQL content (without the surrounding `#[` `]`), exactly as it
+    /// appears inside the branch block so codegen string replacement matches.
+    pub sql_content: String,
+    /// Clean parameter names (suffixes stripped) referenced in this nested block,
+    /// in source order. `params[0]` is the include gate.
     pub params: Vec<String>,
 }
 

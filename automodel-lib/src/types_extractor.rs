@@ -344,7 +344,49 @@ fn build_selected_sql(parsed_sql: &ParsedSql, included: &HashSet<usize>) -> (Str
             sql = sql.replace(&marker, "");
         }
     }
+    // Any `#[...]` markers still present are nested optional blocks (Option B)
+    // inside an included choice-group branch. For EXPLAIN validation and type
+    // extraction we want the fully included ("with cursor") form, so inline them
+    // (keep their content, drop the markers). Nested blocks inside an excluded
+    // branch were already removed with their parent above.
+    sql = inline_nested_markers(&sql);
     convert_named_params_to_positional(&sql)
+}
+
+/// Remove every `#[` / matching `]` marker pair, keeping the inner content, so a
+/// SQL string containing nested optional-block markers becomes valid SQL with
+/// those blocks inlined (fully included).
+fn inline_nested_markers(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '[' => {
+                        depth += 1;
+                        result.push('[');
+                    }
+                    ']' => {
+                        depth -= 1;
+                        if depth > 0 {
+                            result.push(']');
+                        }
+                    }
+                    c => result.push(c),
+                }
+                j += 1;
+            }
+            i = j;
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
 }
 
 /// Extract constraint information from tables involved in a prepared statement

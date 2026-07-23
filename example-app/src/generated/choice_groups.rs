@@ -220,13 +220,13 @@ WHERE email LIKE $1
             final_sql = final_sql.replace(r"#[LIMIT 100]", r"LIMIT 100");
         }
         SearchUsersMixedSort::AgeAsc { limit } => {
-            limit_cg = Some(limit);
             final_sql = final_sql.replace(r"#[ORDER BY age ASC, id ASC LIMIT #{limit?}]", r"ORDER BY age ASC, id ASC LIMIT #{limit?}");
+            limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersMixedSort::AgeDesc { limit } => {
-            limit_cg = Some(limit);
             final_sql = final_sql.replace(r"#[ORDER BY age DESC, id DESC LIMIT #{limit?}]", r"ORDER BY age DESC, id DESC LIMIT #{limit?}");
+            limit_cg = Some(limit);
             included_params.push("limit");
         }
     }
@@ -349,26 +349,26 @@ WHERE email LIKE $1
     let mut lim_cg: Option<&i64> = None;
     match &range {
         Some(MultiGroupSearchRange::Min { min_age }) => {
-            min_age_cg = Some(min_age);
             final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", r"AND age >= #{min_age?}");
+            min_age_cg = Some(min_age);
             included_params.push("min_age");
         }
         Some(MultiGroupSearchRange::Max { max_age }) => {
-            max_age_cg = Some(max_age);
             final_sql = final_sql.replace(r"#[AND age <= #{max_age?}]", r"AND age <= #{max_age?}");
+            max_age_cg = Some(max_age);
             included_params.push("max_age");
         }
         None => {}
     }
     match &sort {
         MultiGroupSearchSort::Asc { lim } => {
-            lim_cg = Some(lim);
             final_sql = final_sql.replace(r"#[ORDER BY id ASC LIMIT #{lim?}]", r"ORDER BY id ASC LIMIT #{lim?}");
+            lim_cg = Some(lim);
             included_params.push("lim");
         }
         MultiGroupSearchSort::Desc { lim } => {
-            lim_cg = Some(lim);
             final_sql = final_sql.replace(r"#[ORDER BY id DESC LIMIT #{lim?}]", r"ORDER BY id DESC LIMIT #{lim?}");
+            lim_cg = Some(lim);
             included_params.push("lim");
         }
     }
@@ -417,6 +417,445 @@ WHERE email LIKE $1
         name: row.try_get::<String, _>("name")?,
         email: row.try_get::<String, _>("email")?,
         age: row.try_get::<Option<i32>, _>("age")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct CursorOptionalFirstPageItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub age: Option<i32>,
+    pub is_active: Option<bool>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CursorOptionalFirstPageSort {
+    NameAsc {
+        cur_name_asc_val: Option<String>,
+        cur_name_asc_id: Option<i32>,
+    },
+    NameDesc {
+        cur_name_desc_val: Option<String>,
+        cur_name_desc_id: Option<i32>,
+    },
+}
+
+/// Keyset pagination where the first page has no cursor and later pages do. The cursor predicate is a nested optional block inside each sort variant (Option B), so each branch exposes its cursor bounds as Option fields — None yields the first page, Some yields the keyset-filtered next page.
+///
+/// Query Plan:
+/// === cursor_optional_first_page (base) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: name, id
+///         ->  Seq Scan on users
+///               Filter: (((name)::text ~~ 'dummy'::text) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)))
+/// JIT:
+///   Functions: 5
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+/// 
+/// === cursor_optional_first_page (variant 1) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: name DESC, id DESC
+///         ->  Seq Scan on users
+///               Filter: (((name)::text ~~ 'dummy'::text) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
+/// JIT:
+///   Functions: 5
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]\n  #[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
+pub async fn cursor_optional_first_page(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, sort: Option<CursorOptionalFirstPageSort>) -> Result<Vec<CursorOptionalFirstPageItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
+FROM public.users
+WHERE name LIKE $1
+  #[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]
+  #[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]
+LIMIT $2;".to_string();
+    let mut included_params = Vec::new();
+
+    let mut cur_name_asc_val_cg: Option<&String> = None;
+    let mut cur_name_asc_id_cg: Option<&i32> = None;
+    let mut cur_name_desc_val_cg: Option<&String> = None;
+    let mut cur_name_desc_id_cg: Option<&i32> = None;
+    match &sort {
+        Some(CursorOptionalFirstPageSort::NameAsc { cur_name_asc_val, cur_name_asc_id }) => {
+            final_sql = final_sql.replace(r"#[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]", r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC");
+            if cur_name_asc_val.is_some() {
+                final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})]", r"AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})");
+                cur_name_asc_val_cg = cur_name_asc_val.as_ref();
+                included_params.push("cur_name_asc_val");
+                cur_name_asc_id_cg = cur_name_asc_id.as_ref();
+                included_params.push("cur_name_asc_id");
+            } else {
+                final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})]", "");
+            }
+        }
+        Some(CursorOptionalFirstPageSort::NameDesc { cur_name_desc_val, cur_name_desc_id }) => {
+            final_sql = final_sql.replace(r"#[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]", r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC");
+            if cur_name_desc_val.is_some() {
+                final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})]", r"AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})");
+                cur_name_desc_val_cg = cur_name_desc_val.as_ref();
+                included_params.push("cur_name_desc_val");
+                cur_name_desc_id_cg = cur_name_desc_id.as_ref();
+                included_params.push("cur_name_desc_id");
+            } else {
+                final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})]", "");
+            }
+        }
+        None => {}
+    }
+    final_sql = final_sql.replace(r"#[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]", "");
+    final_sql = final_sql.replace(r"#[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{name_prefix}", &format!("${}", param_counter));
+    param_counter += 1;
+    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
+    param_counter += 1;
+    if included_params.contains(&r"cur_name_asc_val") {
+        final_sql = final_sql.replace(r"#{cur_name_asc_val?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_name_asc_id") {
+        final_sql = final_sql.replace(r"#{cur_name_asc_id?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_name_desc_val") {
+        final_sql = final_sql.replace(r"#{cur_name_desc_val?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"cur_name_desc_id") {
+        final_sql = final_sql.replace(r"#{cur_name_desc_id?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&name_prefix);
+    query = query.bind(&lim);
+    if included_params.contains(&r"cur_name_asc_val") {
+        query = query.bind(cur_name_asc_val_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_name_asc_id") {
+        query = query.bind(cur_name_asc_id_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_name_desc_val") {
+        query = query.bind(cur_name_desc_val_cg.unwrap());
+    }
+
+    if included_params.contains(&r"cur_name_desc_id") {
+        query = query.bind(cur_name_desc_id_cg.unwrap());
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(CursorOptionalFirstPageItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
+        age: row.try_get::<Option<i32>, _>("age")?,
+        is_active: row.try_get::<Option<bool>, _>("is_active")?,
+        created_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at")?,
+        updated_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct DualNestedAgeBoundsItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub age: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DualNestedAgeBoundsSort {
+    Asc {
+        asc_min_age: Option<i32>,
+        asc_max_age: Option<i32>,
+    },
+    Desc {
+        desc_min_age: Option<i32>,
+        desc_max_age: Option<i32>,
+    },
+}
+
+/// Required `sort` choice group where each variant carries TWO independent nested optional blocks (an optional lower and upper age bound). This exercises multiple nested optional blocks inside a single required variant — any combination of the two bounds may be omitted, and each variant renders its own ORDER BY.
+///
+/// Query Plan:
+/// === dual_nested_age_bounds (base) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: age, id
+///         Presorted Key: age
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
+///               Filter: ((name)::text ~~ 'dummy'::text)
+/// 
+/// === dual_nested_age_bounds (variant 1) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: age DESC, id DESC
+///         Presorted Key: age
+///         ->  Index Scan Backward using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
+///               Filter: ((name)::text ~~ 'dummy'::text)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]\n  #[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]\nLIMIT #{lim};"))]
+pub async fn dual_nested_age_bounds(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, sort: DualNestedAgeBoundsSort) -> Result<Vec<DualNestedAgeBoundsItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT id, name, email, age
+FROM public.users
+WHERE name LIKE $1
+  #[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]
+  #[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]
+LIMIT $2;".to_string();
+    let mut included_params = Vec::new();
+
+    let mut asc_min_age_cg: Option<&i32> = None;
+    let mut asc_max_age_cg: Option<&i32> = None;
+    let mut desc_min_age_cg: Option<&i32> = None;
+    let mut desc_max_age_cg: Option<&i32> = None;
+    match &sort {
+        DualNestedAgeBoundsSort::Asc { asc_min_age, asc_max_age } => {
+            final_sql = final_sql.replace(r"#[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]", r"#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC");
+            if asc_min_age.is_some() {
+                final_sql = final_sql.replace(r"#[AND age >= #{asc_min_age?}]", r"AND age >= #{asc_min_age?}");
+                asc_min_age_cg = asc_min_age.as_ref();
+                included_params.push("asc_min_age");
+            } else {
+                final_sql = final_sql.replace(r"#[AND age >= #{asc_min_age?}]", "");
+            }
+            if asc_max_age.is_some() {
+                final_sql = final_sql.replace(r"#[AND age <= #{asc_max_age?}]", r"AND age <= #{asc_max_age?}");
+                asc_max_age_cg = asc_max_age.as_ref();
+                included_params.push("asc_max_age");
+            } else {
+                final_sql = final_sql.replace(r"#[AND age <= #{asc_max_age?}]", "");
+            }
+        }
+        DualNestedAgeBoundsSort::Desc { desc_min_age, desc_max_age } => {
+            final_sql = final_sql.replace(r"#[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]", r"#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC");
+            if desc_min_age.is_some() {
+                final_sql = final_sql.replace(r"#[AND age >= #{desc_min_age?}]", r"AND age >= #{desc_min_age?}");
+                desc_min_age_cg = desc_min_age.as_ref();
+                included_params.push("desc_min_age");
+            } else {
+                final_sql = final_sql.replace(r"#[AND age >= #{desc_min_age?}]", "");
+            }
+            if desc_max_age.is_some() {
+                final_sql = final_sql.replace(r"#[AND age <= #{desc_max_age?}]", r"AND age <= #{desc_max_age?}");
+                desc_max_age_cg = desc_max_age.as_ref();
+                included_params.push("desc_max_age");
+            } else {
+                final_sql = final_sql.replace(r"#[AND age <= #{desc_max_age?}]", "");
+            }
+        }
+    }
+    final_sql = final_sql.replace(r"#[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]", "");
+    final_sql = final_sql.replace(r"#[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{name_prefix}", &format!("${}", param_counter));
+    param_counter += 1;
+    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
+    param_counter += 1;
+    if included_params.contains(&r"asc_min_age") {
+        final_sql = final_sql.replace(r"#{asc_min_age?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"asc_max_age") {
+        final_sql = final_sql.replace(r"#{asc_max_age?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"desc_min_age") {
+        final_sql = final_sql.replace(r"#{desc_min_age?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"desc_max_age") {
+        final_sql = final_sql.replace(r"#{desc_max_age?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&name_prefix);
+    query = query.bind(&lim);
+    if included_params.contains(&r"asc_min_age") {
+        query = query.bind(asc_min_age_cg.unwrap());
+    }
+
+    if included_params.contains(&r"asc_max_age") {
+        query = query.bind(asc_max_age_cg.unwrap());
+    }
+
+    if included_params.contains(&r"desc_min_age") {
+        query = query.bind(desc_min_age_cg.unwrap());
+    }
+
+    if included_params.contains(&r"desc_max_age") {
+        query = query.bind(desc_max_age_cg.unwrap());
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(DualNestedAgeBoundsItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
+        age: row.try_get::<Option<i32>, _>("age")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectAndNestedMixedItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+    pub age: Option<i32>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DirectAndNestedMixedFilter {
+    ByActive {
+        want_active: bool,
+        active_min_age: Option<i32>,
+    },
+    ByAge {
+        floor_age: i32,
+        ceil_age: Option<i32>,
+    },
+}
+
+/// Required `filter` choice group where each variant mixes a mandatory DIRECT parameter with an optional NESTED block in the same variant. `by_active` always binds `want_active` and may additionally narrow by a nested minimum age; `by_age` always binds `floor_age` and may additionally cap with a nested maximum age. This verifies direct (non-Option) and nested (Option) parameters coexist within one variant.
+///
+/// Query Plan:
+/// === direct_and_nested_mixed (base) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: id
+///         ->  Bitmap Heap Scan on users
+///               Recheck Cond: (age >= 0)
+///               Filter: ((NOT is_active) AND ((name)::text ~~ 'dummy'::text))
+///               ->  Bitmap Index Scan on idx_users_age
+///                     Index Cond: (age >= 0)
+/// 
+/// === direct_and_nested_mixed (variant 1) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: id
+///         ->  Index Scan using idx_users_age on users
+///               Index Cond: ((age >= 0) AND (age <= 0))
+///               Filter: ((name)::text ~~ 'dummy'::text)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]\n  #[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]\nORDER BY id ASC\nLIMIT #{lim};"))]
+pub async fn direct_and_nested_mixed(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, filter: DirectAndNestedMixedFilter) -> Result<Vec<DirectAndNestedMixedItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT id, name, email, age, is_active
+FROM public.users
+WHERE name LIKE $1
+  #[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]
+  #[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]
+ORDER BY id ASC
+LIMIT $2;".to_string();
+    let mut included_params = Vec::new();
+
+    let mut want_active_cg: Option<&bool> = None;
+    let mut active_min_age_cg: Option<&i32> = None;
+    let mut floor_age_cg: Option<&i32> = None;
+    let mut ceil_age_cg: Option<&i32> = None;
+    match &filter {
+        DirectAndNestedMixedFilter::ByActive { want_active, active_min_age } => {
+            final_sql = final_sql.replace(r"#[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]", r"AND is_active = #{want_active} #[AND age >= #{active_min_age?}]");
+            want_active_cg = Some(want_active);
+            included_params.push("want_active");
+            if active_min_age.is_some() {
+                final_sql = final_sql.replace(r"#[AND age >= #{active_min_age?}]", r"AND age >= #{active_min_age?}");
+                active_min_age_cg = active_min_age.as_ref();
+                included_params.push("active_min_age");
+            } else {
+                final_sql = final_sql.replace(r"#[AND age >= #{active_min_age?}]", "");
+            }
+        }
+        DirectAndNestedMixedFilter::ByAge { floor_age, ceil_age } => {
+            final_sql = final_sql.replace(r"#[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]", r"AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]");
+            floor_age_cg = Some(floor_age);
+            included_params.push("floor_age");
+            if ceil_age.is_some() {
+                final_sql = final_sql.replace(r"#[AND age <= #{ceil_age?}]", r"AND age <= #{ceil_age?}");
+                ceil_age_cg = ceil_age.as_ref();
+                included_params.push("ceil_age");
+            } else {
+                final_sql = final_sql.replace(r"#[AND age <= #{ceil_age?}]", "");
+            }
+        }
+    }
+    final_sql = final_sql.replace(r"#[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]", "");
+    final_sql = final_sql.replace(r"#[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{name_prefix}", &format!("${}", param_counter));
+    param_counter += 1;
+    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
+    param_counter += 1;
+    if included_params.contains(&r"want_active") {
+        final_sql = final_sql.replace(r"#{want_active}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"active_min_age") {
+        final_sql = final_sql.replace(r"#{active_min_age?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"floor_age") {
+        final_sql = final_sql.replace(r"#{floor_age}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    if included_params.contains(&r"ceil_age") {
+        final_sql = final_sql.replace(r"#{ceil_age?}", &format!("${}", param_counter));
+        param_counter += 1;
+    }
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&name_prefix);
+    query = query.bind(&lim);
+    if included_params.contains(&r"want_active") {
+        query = query.bind(want_active_cg.unwrap());
+    }
+
+    if included_params.contains(&r"active_min_age") {
+        query = query.bind(active_min_age_cg.unwrap());
+    }
+
+    if included_params.contains(&r"floor_age") {
+        query = query.bind(floor_age_cg.unwrap());
+    }
+
+    if included_params.contains(&r"ceil_age") {
+        query = query.bind(ceil_age_cg.unwrap());
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(DirectAndNestedMixedItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
+        age: row.try_get::<Option<i32>, _>("age")?,
+        is_active: row.try_get::<Option<bool>, _>("is_active")?,
     })
     }).collect();
     result.map_err(Into::into)
@@ -645,31 +1084,31 @@ LIMIT $2;".to_string();
     }
     match &sort {
         Some(ReproCombinedCursorSortSort::UaAsc { cur_ua_asc_ts, cur_ua_asc_id }) => {
-            cur_ua_asc_ts_cg = Some(cur_ua_asc_ts);
-            cur_ua_asc_id_cg = Some(cur_ua_asc_id);
             final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]", r"AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC");
+            cur_ua_asc_ts_cg = Some(cur_ua_asc_ts);
             included_params.push("cur_ua_asc_ts");
+            cur_ua_asc_id_cg = Some(cur_ua_asc_id);
             included_params.push("cur_ua_asc_id");
         }
         Some(ReproCombinedCursorSortSort::UaDesc { cur_ua_desc_ts, cur_ua_desc_id }) => {
-            cur_ua_desc_ts_cg = Some(cur_ua_desc_ts);
-            cur_ua_desc_id_cg = Some(cur_ua_desc_id);
             final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]", r"AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC");
+            cur_ua_desc_ts_cg = Some(cur_ua_desc_ts);
             included_params.push("cur_ua_desc_ts");
+            cur_ua_desc_id_cg = Some(cur_ua_desc_id);
             included_params.push("cur_ua_desc_id");
         }
         Some(ReproCombinedCursorSortSort::NameAsc { cur_name_asc_val, cur_name_asc_id }) => {
-            cur_name_asc_val_cg = Some(cur_name_asc_val);
-            cur_name_asc_id_cg = Some(cur_name_asc_id);
             final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]", r"AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC");
+            cur_name_asc_val_cg = Some(cur_name_asc_val);
             included_params.push("cur_name_asc_val");
+            cur_name_asc_id_cg = Some(cur_name_asc_id);
             included_params.push("cur_name_asc_id");
         }
         Some(ReproCombinedCursorSortSort::NameDesc { cur_name_desc_val, cur_name_desc_id }) => {
-            cur_name_desc_val_cg = Some(cur_name_desc_val);
-            cur_name_desc_id_cg = Some(cur_name_desc_id);
             final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]", r"AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC");
+            cur_name_desc_val_cg = Some(cur_name_desc_val);
             included_params.push("cur_name_desc_val");
+            cur_name_desc_id_cg = Some(cur_name_desc_id);
             included_params.push("cur_name_desc_id");
         }
         None => {}
