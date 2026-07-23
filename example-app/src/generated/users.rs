@@ -316,8 +316,23 @@ pub struct FindUsersByNameAndAgeItem {
 /// Find public.users by name pattern with optional minimum age filter (using conditional syntax)
 ///
 /// Query Plan:
+/// === find_users_by_name_and_age (base) ===
+/// Seq Scan on users
+///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
+/// JIT:
+///   Functions: 4
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+/// 
+/// === find_users_by_name_and_age (variant 1) ===
+/// Bitmap Heap Scan on users
+///   Recheck Cond: (age >= 0)
+///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
+///   ->  Bitmap Index Scan on idx_users_age
+///         Index Cond: (age >= 0)
+/// 
+/// === find_users_by_name_and_age (variant 2) ===
 /// Index Scan using idx_users_age on users
-///   Index Cond: ((age >= 0) AND (age <= 0))
+///   Index Cond: (age <= 0)
 ///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age \nFROM public.users \nWHERE name ILIKE #{name_pattern} \n#[AND age >= #{min_age?}] \nAND name = #{name_exact} \n#[AND age <= #{max_age?}] \nORDER BY name"))]
 pub async fn find_users_by_name_and_age(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_pattern: String, min_age: Option<i32>, name_exact: String, max_age: Option<i32>) -> Result<Vec<FindUsersByNameAndAgeItem>, super::ErrorReadOnly> {
@@ -533,13 +548,39 @@ pub struct SearchUsersAdvancedItem {
 /// Advanced user search with multiple optional filters using conditional syntax
 ///
 /// Query Plan:
+/// === search_users_advanced (base) ===
+/// Sort
+///   Sort Key: created_at DESC
+///   ->  Seq Scan on users
+/// JIT:
+///   Functions: 2
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+/// 
+/// === search_users_advanced (variant 1) ===
+/// Sort
+///   Sort Key: created_at DESC
+///   ->  Seq Scan on users
+///         Filter: ((name)::text ~~* 'dummy'::text)
+/// JIT:
+///   Functions: 4
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+/// 
+/// === search_users_advanced (variant 2) ===
 /// Sort
 ///   Sort Key: created_at DESC
 ///   ->  Bitmap Heap Scan on users
 ///         Recheck Cond: (age >= 0)
-///         Filter: (((name)::text ~~* 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone))
 ///         ->  Bitmap Index Scan on idx_users_age
 ///               Index Cond: (age >= 0)
+/// 
+/// === search_users_advanced (variant 3) ===
+/// Sort
+///   Sort Key: created_at DESC
+///   ->  Seq Scan on users
+///         Filter: (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone)
+/// JIT:
+///   Functions: 4
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, created_at \nFROM public.users \nWHERE 1=1 \n#[AND name ILIKE #{name_pattern?}] \n#[AND age >= #{min_age?}] \n#[AND created_at >= #{since?}] \nORDER BY created_at DESC"))]
 pub async fn search_users_advanced(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_pattern: Option<String>, min_age: Option<i32>, since: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<SearchUsersAdvancedItem>, super::ErrorReadOnly> {
     let mut final_sql = r"SELECT id, name, email, age, created_at 
@@ -2121,6 +2162,14 @@ pub struct GetUsersCursorItem {
 /// Keyset pagination over users using a two-parameter conditional cursor block
 ///
 /// Query Plan:
+/// === get_users_cursor (base) ===
+/// Limit
+///   ->  Incremental Sort
+///         Sort Key: updated_at, id
+///         Presorted Key: updated_at
+///         ->  Index Scan using idx_users_updated_at on users
+/// 
+/// === get_users_cursor (variant 1) ===
 /// Limit
 ///   ->  Incremental Sort
 ///         Sort Key: updated_at, id
@@ -2347,19 +2396,21 @@ pub enum SearchUsersFilteredSort {
 /// 
 /// === search_users_filtered (variant 1) ===
 /// Limit
-///   ->  Sort
+///   ->  Incremental Sort
 ///         Sort Key: updated_at, id
-///         ->  Index Scan using idx_users_age on users
-///               Index Cond: ((age >= 0) AND (age <= 0))
-///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
+///         Presorted Key: updated_at
+///         ->  Index Scan using idx_users_updated_at on users
+///               Index Cond: ((updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone))
+///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (age >= 0) AND (age <= 0) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 /// 
 /// === search_users_filtered (variant 2) ===
 /// Limit
-///   ->  Sort
+///   ->  Incremental Sort
 ///         Sort Key: updated_at DESC, id DESC
-///         ->  Index Scan using idx_users_age on users
-///               Index Cond: ((age >= 0) AND (age <= 0))
-///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
+///         Presorted Key: updated_at
+///         ->  Index Scan Backward using idx_users_updated_at on users
+///               Index Cond: ((updated_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (updated_at <= '1970-01-01 00:00:00+00'::timestamp with time zone))
+///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (age >= 0) AND (age <= 0) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 /// 
 /// === search_users_filtered (variant 3) ===
 /// Limit

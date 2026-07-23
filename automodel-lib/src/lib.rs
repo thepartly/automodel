@@ -687,7 +687,7 @@ impl AutoModel {
         // Looks like a SELECT or read-only query - verify with EXPLAIN
         let explain_result = if query.ensure_indexes {
             // Run full performance analysis (which includes EXPLAIN)
-            Self::analyze_query_performance(client, query, &explain_params).await
+            Self::analyze_query_performance(client, query).await
         } else {
             // Just run a simple EXPLAIN to verify it's read-only
             Self::detect_mutation_via_explain(client, query, &explain_params).await
@@ -907,18 +907,43 @@ impl AutoModel {
     async fn analyze_query_performance(
         client: &tokio_postgres::Client,
         query: &QueryDefinition,
-        explain_params: &[Option<ExplainParams>],
     ) -> Result<PerformanceAnalysis> {
         let mut has_sequential_scan = false;
         let mut sequential_scan_tables = Vec::new();
         let mut warnings = Vec::new();
         let mut full_query_plan = String::new();
 
-        // Analyze each variant from the pre-processed group-aware explain_variants
-        for (i, (converted_sql, param_names, variant_label)) in
-            query.explain_variants.iter().enumerate()
-        {
+        // Choose the variant set used for query-plan coverage:
+        // - No choice groups: use `sql_variants` (base with all conditional
+        //   blocks removed + each additive `#[...]` block in isolation) so every
+        //   optional block gets its own plan/warnings.
+        // - With choice groups: use `explain_variants` (all additive blocks
+        //   combined with exactly one branch per group) which is the only set
+        //   that keeps mutually-exclusive branches as valid, separately-prepared
+        //   SQL.
+        let plan_variants = if query.choice_groups.is_empty() {
+            &query.sql_variants
+        } else {
+            &query.explain_variants
+        };
+
+        for (i, (converted_sql, param_names, variant_label)) in plan_variants.iter().enumerate() {
             let variant_name = format!("{} ({})", query.name, variant_label);
+
+            // Compute EXPLAIN parameters for this specific variant (special-param
+            // inlining + positional renumbering). Aligned to this variant's SQL.
+            let variant_explain_params = if param_names.is_empty() {
+                None
+            } else {
+                match client.prepare(converted_sql).await {
+                    Ok(statement) => {
+                        Self::prepare_explain_params_for_variant(converted_sql, statement.params())
+                            .await
+                            .ok()
+                    }
+                    Err(_) => None,
+                }
+            };
 
             let (variant_has_seq_scan, variant_tables, variant_warnings, variant_plan) =
                 Self::analyze_single_query(
@@ -926,7 +951,7 @@ impl AutoModel {
                     converted_sql,
                     param_names,
                     &variant_name,
-                    explain_params.get(i).and_then(|p| p.as_ref()),
+                    variant_explain_params.as_ref(),
                 )
                 .await?;
 
@@ -940,7 +965,7 @@ impl AutoModel {
             if i > 0 {
                 full_query_plan.push_str("\n\n");
             }
-            if query.explain_variants.len() > 1 {
+            if plan_variants.len() > 1 {
                 full_query_plan.push_str(&format!("=== {} ===\n", variant_name));
             }
             full_query_plan.push_str(&variant_plan);

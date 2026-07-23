@@ -167,7 +167,7 @@ pub enum SearchUsersMixedSort {
 /// Query Plan:
 /// === search_users_mixed (base) ===
 /// Limit
-///   ->  Index Scan using idx_users_age on users
+///   ->  Index Scan using idx_users_age_updated_at on users
 ///         Index Cond: ((age >= 0) AND (age <= 0))
 ///         Filter: ((email)::text ~~ 'dummy'::text)
 /// 
@@ -176,7 +176,7 @@ pub enum SearchUsersMixedSort {
 ///   ->  Incremental Sort
 ///         Sort Key: age, id
 ///         Presorted Key: age
-///         ->  Index Scan using idx_users_age on users
+///         ->  Index Scan using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 /// 
@@ -185,7 +185,7 @@ pub enum SearchUsersMixedSort {
 ///   ->  Incremental Sort
 ///         Sort Key: age DESC, id DESC
 ///         Presorted Key: age
-///         ->  Index Scan Backward using idx_users_age on users
+///         ->  Index Scan Backward using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE email LIKE #{email_prefix}\n  #[AND age >= #{min_age?}]\n  #[AND age <= #{max_age?}]\n#[LIMIT 100]\n#[ORDER BY age ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY age DESC, id DESC LIMIT #{limit?}]"))]
@@ -598,7 +598,7 @@ pub enum DualNestedAgeBoundsSort {
 ///   ->  Incremental Sort
 ///         Sort Key: age, id
 ///         Presorted Key: age
-///         ->  Index Scan using idx_users_age on users
+///         ->  Index Scan using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((name)::text ~~ 'dummy'::text)
 /// 
@@ -607,7 +607,7 @@ pub enum DualNestedAgeBoundsSort {
 ///   ->  Incremental Sort
 ///         Sort Key: age DESC, id DESC
 ///         Presorted Key: age
-///         ->  Index Scan Backward using idx_users_age on users
+///         ->  Index Scan Backward using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((name)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]\n  #[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]\nLIMIT #{lim};"))]
@@ -757,7 +757,7 @@ pub enum DirectAndNestedMixedFilter {
 /// Limit
 ///   ->  Sort
 ///         Sort Key: id
-///         ->  Index Scan using idx_users_age on users
+///         ->  Index Scan using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((name)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]\n  #[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]\nORDER BY id ASC\nLIMIT #{lim};"))]
