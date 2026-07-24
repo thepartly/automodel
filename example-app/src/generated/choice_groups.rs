@@ -193,46 +193,47 @@ pub async fn search_users_mixed(executor: impl sqlx::Executor<'_, Database = sql
     let mut final_sql = r"SELECT id, name, email, age
 FROM public.users
 WHERE email LIKE $1
-  #[AND age >= #{min_age?}]
-  #[AND age <= #{max_age?}]
-#[LIMIT 100]
-#[ORDER BY age ASC, id ASC LIMIT #{limit?}]
-#[ORDER BY age DESC, id DESC LIMIT #{limit?}]".to_string();
-    let mut included_params = Vec::new();
+  __AM_BLK_0__
+  __AM_BLK_1__
+__AM_BLK_2__
+__AM_BLK_3__
+__AM_BLK_4__".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
 
     if min_age.is_some() {
-        final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", r"AND age >= #{min_age?}");
+        final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND age >= #{min_age?}");
         included_params.push("min_age");
     } else {
-        final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_0__", "");
     }
 
     if max_age.is_some() {
-        final_sql = final_sql.replace(r"#[AND age <= #{max_age?}]", r"AND age <= #{max_age?}");
+        final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND age <= #{max_age?}");
         included_params.push("max_age");
     } else {
-        final_sql = final_sql.replace(r"#[AND age <= #{max_age?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_1__", "");
     }
 
     let mut limit_cg: Option<&i64> = None;
     match &sort {
         SearchUsersMixedSort::Unsorted => {
-            final_sql = final_sql.replace(r"#[LIMIT 100]", r"LIMIT 100");
+            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LIMIT 100");
         }
         SearchUsersMixedSort::AgeAsc { limit } => {
-            final_sql = final_sql.replace(r"#[ORDER BY age ASC, id ASC LIMIT #{limit?}]", r"ORDER BY age ASC, id ASC LIMIT #{limit?}");
+            final_sql = final_sql.replace(r"__AM_BLK_3__", r"ORDER BY age ASC, id ASC LIMIT #{limit?}");
             limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersMixedSort::AgeDesc { limit } => {
-            final_sql = final_sql.replace(r"#[ORDER BY age DESC, id DESC LIMIT #{limit?}]", r"ORDER BY age DESC, id DESC LIMIT #{limit?}");
+            final_sql = final_sql.replace(r"__AM_BLK_4__", r"ORDER BY age DESC, id DESC LIMIT #{limit?}");
             limit_cg = Some(limit);
             included_params.push("limit");
         }
     }
-    final_sql = final_sql.replace(r"#[LIMIT 100]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY age ASC, id ASC LIMIT #{limit?}]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY age DESC, id DESC LIMIT #{limit?}]", "");
+    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_4__", "");
 
     #[allow(unused_assignments)]
     let mut param_counter = 1;
@@ -338,23 +339,24 @@ pub async fn multi_group_search(executor: impl sqlx::Executor<'_, Database = sql
     let mut final_sql = r"SELECT id, name, email, age
 FROM public.users
 WHERE email LIKE $1
-  #[AND age >= #{min_age?}]
-  #[AND age <= #{max_age?}]
-#[ORDER BY id ASC LIMIT #{lim?}]
-#[ORDER BY id DESC LIMIT #{lim?}]".to_string();
-    let mut included_params = Vec::new();
+  __AM_BLK_0__
+  __AM_BLK_1__
+__AM_BLK_2__
+__AM_BLK_3__".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
 
     let mut min_age_cg: Option<&i32> = None;
     let mut max_age_cg: Option<&i32> = None;
     let mut lim_cg: Option<&i64> = None;
     match &range {
         Some(MultiGroupSearchRange::Min { min_age }) => {
-            final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", r"AND age >= #{min_age?}");
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND age >= #{min_age?}");
             min_age_cg = Some(min_age);
             included_params.push("min_age");
         }
         Some(MultiGroupSearchRange::Max { max_age }) => {
-            final_sql = final_sql.replace(r"#[AND age <= #{max_age?}]", r"AND age <= #{max_age?}");
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND age <= #{max_age?}");
             max_age_cg = Some(max_age);
             included_params.push("max_age");
         }
@@ -362,20 +364,20 @@ WHERE email LIKE $1
     }
     match &sort {
         MultiGroupSearchSort::Asc { lim } => {
-            final_sql = final_sql.replace(r"#[ORDER BY id ASC LIMIT #{lim?}]", r"ORDER BY id ASC LIMIT #{lim?}");
+            final_sql = final_sql.replace(r"__AM_BLK_2__", r"ORDER BY id ASC LIMIT #{lim?}");
             lim_cg = Some(lim);
             included_params.push("lim");
         }
         MultiGroupSearchSort::Desc { lim } => {
-            final_sql = final_sql.replace(r"#[ORDER BY id DESC LIMIT #{lim?}]", r"ORDER BY id DESC LIMIT #{lim?}");
+            final_sql = final_sql.replace(r"__AM_BLK_3__", r"ORDER BY id DESC LIMIT #{lim?}");
             lim_cg = Some(lim);
             included_params.push("lim");
         }
     }
-    final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", "");
-    final_sql = final_sql.replace(r"#[AND age <= #{max_age?}]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY id ASC LIMIT #{lim?}]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY id DESC LIMIT #{lim?}]", "");
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
 
     #[allow(unused_assignments)]
     let mut param_counter = 1;
@@ -472,10 +474,11 @@ pub async fn cursor_optional_first_page(executor: impl sqlx::Executor<'_, Databa
     let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
 FROM public.users
 WHERE name LIKE $1
-  #[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]
-  #[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]
+  __AM_BLK_0__
+  __AM_BLK_1__
 LIMIT $2;".to_string();
-    let mut included_params = Vec::new();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
 
     let mut cur_name_asc_val_cg: Option<&String> = None;
     let mut cur_name_asc_id_cg: Option<&i32> = None;
@@ -483,7 +486,7 @@ LIMIT $2;".to_string();
     let mut cur_name_desc_id_cg: Option<&i32> = None;
     match &sort {
         Some(CursorOptionalFirstPageSort::NameAsc { cur_name_asc_val, cur_name_asc_id }) => {
-            final_sql = final_sql.replace(r"#[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]", r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC");
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC");
             if cur_name_asc_val.is_some() {
                 final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})]", r"AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})");
                 cur_name_asc_val_cg = cur_name_asc_val.as_ref();
@@ -495,7 +498,7 @@ LIMIT $2;".to_string();
             }
         }
         Some(CursorOptionalFirstPageSort::NameDesc { cur_name_desc_val, cur_name_desc_id }) => {
-            final_sql = final_sql.replace(r"#[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]", r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC");
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC");
             if cur_name_desc_val.is_some() {
                 final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})]", r"AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})");
                 cur_name_desc_val_cg = cur_name_desc_val.as_ref();
@@ -508,8 +511,8 @@ LIMIT $2;".to_string();
         }
         None => {}
     }
-    final_sql = final_sql.replace(r"#[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]", "");
-    final_sql = final_sql.replace(r"#[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]", "");
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
 
     #[allow(unused_assignments)]
     let mut param_counter = 1;
@@ -615,10 +618,11 @@ pub async fn dual_nested_age_bounds(executor: impl sqlx::Executor<'_, Database =
     let mut final_sql = r"SELECT id, name, email, age
 FROM public.users
 WHERE name LIKE $1
-  #[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]
-  #[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]
+  __AM_BLK_0__
+  __AM_BLK_1__
 LIMIT $2;".to_string();
-    let mut included_params = Vec::new();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
 
     let mut asc_min_age_cg: Option<&i32> = None;
     let mut asc_max_age_cg: Option<&i32> = None;
@@ -626,7 +630,7 @@ LIMIT $2;".to_string();
     let mut desc_max_age_cg: Option<&i32> = None;
     match &sort {
         DualNestedAgeBoundsSort::Asc { asc_min_age, asc_max_age } => {
-            final_sql = final_sql.replace(r"#[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]", r"#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC");
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC");
             if asc_min_age.is_some() {
                 final_sql = final_sql.replace(r"#[AND age >= #{asc_min_age?}]", r"AND age >= #{asc_min_age?}");
                 asc_min_age_cg = asc_min_age.as_ref();
@@ -643,7 +647,7 @@ LIMIT $2;".to_string();
             }
         }
         DualNestedAgeBoundsSort::Desc { desc_min_age, desc_max_age } => {
-            final_sql = final_sql.replace(r"#[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]", r"#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC");
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC");
             if desc_min_age.is_some() {
                 final_sql = final_sql.replace(r"#[AND age >= #{desc_min_age?}]", r"AND age >= #{desc_min_age?}");
                 desc_min_age_cg = desc_min_age.as_ref();
@@ -660,8 +664,8 @@ LIMIT $2;".to_string();
             }
         }
     }
-    final_sql = final_sql.replace(r"#[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]", "");
-    final_sql = final_sql.replace(r"#[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]", "");
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
 
     #[allow(unused_assignments)]
     let mut param_counter = 1;
@@ -765,11 +769,12 @@ pub async fn direct_and_nested_mixed(executor: impl sqlx::Executor<'_, Database 
     let mut final_sql = r"SELECT id, name, email, age, is_active
 FROM public.users
 WHERE name LIKE $1
-  #[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]
-  #[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]
+  __AM_BLK_0__
+  __AM_BLK_1__
 ORDER BY id ASC
 LIMIT $2;".to_string();
-    let mut included_params = Vec::new();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
 
     let mut want_active_cg: Option<&bool> = None;
     let mut active_min_age_cg: Option<&i32> = None;
@@ -777,7 +782,7 @@ LIMIT $2;".to_string();
     let mut ceil_age_cg: Option<&i32> = None;
     match &filter {
         DirectAndNestedMixedFilter::ByActive { want_active, active_min_age } => {
-            final_sql = final_sql.replace(r"#[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]", r"AND is_active = #{want_active} #[AND age >= #{active_min_age?}]");
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND is_active = #{want_active} #[AND age >= #{active_min_age?}]");
             want_active_cg = Some(want_active);
             included_params.push("want_active");
             if active_min_age.is_some() {
@@ -789,7 +794,7 @@ LIMIT $2;".to_string();
             }
         }
         DirectAndNestedMixedFilter::ByAge { floor_age, ceil_age } => {
-            final_sql = final_sql.replace(r"#[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]", r"AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]");
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]");
             floor_age_cg = Some(floor_age);
             included_params.push("floor_age");
             if ceil_age.is_some() {
@@ -801,8 +806,8 @@ LIMIT $2;".to_string();
             }
         }
     }
-    final_sql = final_sql.replace(r"#[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]", "");
-    final_sql = final_sql.replace(r"#[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]", "");
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
 
     #[allow(unused_assignments)]
     let mut param_counter = 1;
@@ -856,6 +861,437 @@ LIMIT $2;".to_string();
         email: row.try_get::<String, _>("email")?,
         age: row.try_get::<Option<i32>, _>("age")?,
         is_active: row.try_get::<Option<bool>, _>("is_active")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOptionalReferrerItem {
+    pub id: i32,
+    pub name: String,
+    pub referrer_age: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UserOptionalReferrerReferrer {
+    On,
+    Off,
+}
+
+/// Fetch users by email prefix; when `referrer=on` each row also carries the referrer's age via a joined self-reference (users.referrer_id), and when `referrer=off` the LEFT JOIN is skipped entirely and referrer_age comes back NULL. Demonstrates a single selector driving two coordinated fragments (projection + join) that switch together while keeping a fixed result shape
+///
+/// Query Plan:
+/// === user_optional_referrer (base) ===
+/// Sort
+///   Sort Key: u.id
+///   ->  Nested Loop Left Join
+///         ->  Index Scan using users_email_key on users u
+///               Index Cond: ((email)::text = 'dummy'::text)
+///               Filter: ((email)::text ~~ 'dummy'::text)
+///         ->  Index Scan using users_pkey on users r
+///               Index Cond: (id = u.referrer_id)
+/// 
+/// === user_optional_referrer (variant 1) ===
+/// Sort
+///   Sort Key: id
+///   ->  Index Scan using users_email_key on users u
+///         Index Cond: ((email)::text = 'dummy'::text)
+///         Filter: ((email)::text ~~ 'dummy'::text)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r.age]#[NULL] AS referrer_age\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+pub async fn user_optional_referrer(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerReferrer) -> Result<Vec<UserOptionalReferrerItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT
+  u.id,
+  u.name,
+  __AM_BLK_0____AM_BLK_1__ AS referrer_age
+FROM public.users u
+__AM_BLK_2__
+WHERE u.email LIKE $1
+ORDER BY u.id".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
+
+    match &referrer {
+        UserOptionalReferrerReferrer::On => {
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"r.age");
+            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LEFT JOIN public.users r ON r.id = u.referrer_id");
+        }
+        UserOptionalReferrerReferrer::Off => {
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
+        }
+    }
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
+    param_counter += 1;
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&email_prefix);
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(UserOptionalReferrerItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        referrer_age: row.try_get::<Option<i32>, _>("referrer_age")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOptionalOwnFieldItem {
+    pub id: i32,
+    pub name: String,
+    pub maybe_age: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UserOptionalOwnFieldAge {
+    On,
+    Off,
+}
+
+/// Conditionally project a NON-joined base-table column. When `age=on` each row carries the user's own age, when `age=off` the column comes back NULL. No join is involved — this is the single-block-per-variant projection case (each branch is one block), so it exercises the isolated-variant generator rather than the membership-based one
+///
+/// Query Plan:
+/// === user_optional_own_field (base) ===
+/// Sort
+///   Sort Key: id
+///   ->  Index Scan using users_email_key on users u
+///         Index Cond: ((email)::text = 'dummy'::text)
+///         Filter: ((email)::text ~~ 'dummy'::text)
+/// 
+/// === user_optional_own_field (variant 1) ===
+/// Sort
+///   Sort Key: id
+///   ->  Index Scan using users_email_key on users u
+///         Index Cond: ((email)::text = 'dummy'::text)
+///         Filter: ((email)::text ~~ 'dummy'::text)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[u.age]#[NULL] AS maybe_age\nFROM public.users u\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+pub async fn user_optional_own_field(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, age: UserOptionalOwnFieldAge) -> Result<Vec<UserOptionalOwnFieldItem>, super::ErrorReadOnly> {
+    let sql: &str = match &age {
+        UserOptionalOwnFieldAge::On => r"SELECT
+         u.id,
+         u.name,
+         u.age AS maybe_age
+        FROM public.users u
+        WHERE u.email LIKE $1
+        ORDER BY u.id",
+        UserOptionalOwnFieldAge::Off => r"SELECT
+         u.id,
+         u.name,
+         NULL AS maybe_age
+        FROM public.users u
+        WHERE u.email LIKE $1
+        ORDER BY u.id",
+    };
+
+    let mut query = sqlx::query(sql);
+    match &age {
+        UserOptionalOwnFieldAge::On => {
+            query = query.bind(&email_prefix);
+        }
+        UserOptionalOwnFieldAge::Off => {
+            query = query.bind(&email_prefix);
+        }
+    }
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(UserOptionalOwnFieldItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        maybe_age: row.try_get::<Option<i32>, _>("maybe_age")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOptionalReferrerFullItem {
+    pub id: i32,
+    pub name: String,
+    pub referrer: Option<super::types::public::Users>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UserOptionalReferrerFullReferrer {
+    On,
+    Off,
+}
+
+/// Conditionally return the WHOLE referrer user as a nested composite (the table row type), not just one column. When `referrer=on` a self LEFT JOIN is added and the entire referrer row is projected via `r AS referrer` (mapped to the generated `public.users` composite struct); when `referrer=off` the join is dropped and referrer comes back NULL. Row expressions are inherently nullable, so the field is `Option<..::Users>` with no false-non-null risk — and it needs no JSON aggregate
+///
+/// Query Plan:
+/// === user_optional_referrer_full (base) ===
+/// Sort
+///   Sort Key: u.id
+///   ->  Nested Loop Left Join
+///         ->  Index Scan using users_email_key on users u
+///               Index Cond: ((email)::text = 'dummy'::text)
+///               Filter: ((email)::text ~~ 'dummy'::text)
+///         ->  Index Scan using users_pkey on users r
+///               Index Cond: (id = u.referrer_id)
+/// 
+/// === user_optional_referrer_full (variant 1) ===
+/// Sort
+///   Sort Key: id
+///   ->  Index Scan using users_email_key on users u
+///         Index Cond: ((email)::text = 'dummy'::text)
+///         Filter: ((email)::text ~~ 'dummy'::text)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r]#[NULL] AS referrer\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+pub async fn user_optional_referrer_full(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerFullReferrer) -> Result<Vec<UserOptionalReferrerFullItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT
+  u.id,
+  u.name,
+  __AM_BLK_0____AM_BLK_1__ AS referrer
+FROM public.users u
+__AM_BLK_2__
+WHERE u.email LIKE $1
+ORDER BY u.id".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
+
+    match &referrer {
+        UserOptionalReferrerFullReferrer::On => {
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"r");
+            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LEFT JOIN public.users r ON r.id = u.referrer_id");
+        }
+        UserOptionalReferrerFullReferrer::Off => {
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
+        }
+    }
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
+    param_counter += 1;
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&email_prefix);
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(UserOptionalReferrerFullItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        referrer: row.try_get::<Option<super::types::public::Users>, _>("referrer")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOptionalPostsItem {
+    pub id: i32,
+    pub name: String,
+    pub posts: Option<Vec<super::types::public::Posts>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UserOptionalPostsPosts {
+    On,
+    Off,
+}
+
+/// Conditionally return a COLLECTION of child rows (a user's posts) WITHOUT any JSON aggregate — using `array_agg` over the child table's implicit composite type, which decodes to `Vec<..::Posts>`. When `posts=on` a LEFT JOIN + GROUP BY are added and `array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)` builds the composite array; when `posts=off` the join, aggregate and GROUP BY all vanish and posts comes back NULL. A single selector drives three coordinated fragments (projection, join, group-by), proving that a multi-block branch keeps a fixed result shape
+///
+/// Query Plan:
+/// === user_optional_posts (base) ===
+/// GroupAggregate
+///   Group Key: u.id
+///   ->  Incremental Sort
+///         Sort Key: u.id, p.id
+///         Presorted Key: u.id
+///         ->  Merge Left Join
+///               Merge Cond: (u.id = p.author_id)
+///               ->  Sort
+///                     Sort Key: u.id
+///                     ->  Index Scan using users_email_key on users u
+///                           Index Cond: ((email)::text = 'dummy'::text)
+///                           Filter: ((email)::text ~~ 'dummy'::text)
+///               ->  Sort
+///                     Sort Key: p.author_id
+///                     ->  Seq Scan on posts p
+/// JIT:
+///   Functions: 20
+///   Options: Inlining true, Optimization true, Expressions true, Deforming true
+/// 
+/// === user_optional_posts (variant 1) ===
+/// Sort
+///   Sort Key: id
+///   ->  Index Scan using users_email_key on users u
+///         Index Cond: ((email)::text = 'dummy'::text)
+///         Filter: ((email)::text ~~ 'dummy'::text)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)]#[NULL] AS posts\nFROM public.users u\n#[LEFT JOIN public.posts p ON p.author_id = u.id]\nWHERE u.email LIKE #{email_prefix}\n#[GROUP BY u.id, u.name]\nORDER BY u.id"))]
+pub async fn user_optional_posts(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, posts: UserOptionalPostsPosts) -> Result<Vec<UserOptionalPostsItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT
+  u.id,
+  u.name,
+  __AM_BLK_0____AM_BLK_1__ AS posts
+FROM public.users u
+__AM_BLK_2__
+WHERE u.email LIKE $1
+__AM_BLK_3__
+ORDER BY u.id".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
+
+    match &posts {
+        UserOptionalPostsPosts::On => {
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)");
+            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LEFT JOIN public.posts p ON p.author_id = u.id");
+            final_sql = final_sql.replace(r"__AM_BLK_3__", r"GROUP BY u.id, u.name");
+        }
+        UserOptionalPostsPosts::Off => {
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
+        }
+    }
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
+    param_counter += 1;
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&email_prefix);
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(UserOptionalPostsItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        posts: row.try_get::<Option<Vec<super::types::public::Posts>>, _>("posts")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOptionalReferrerAndPostsItem {
+    pub id: i32,
+    pub name: String,
+    pub referrer: Option<super::types::public::Users>,
+    pub posts: Option<Vec<super::types::public::Posts>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UserOptionalReferrerAndPostsReferrer {
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone)]
+pub enum UserOptionalReferrerAndPostsPosts {
+    On,
+    Off,
+}
+
+/// TWO independent selectors in ONE query. `referrer` toggles a whole-row composite (self LEFT JOIN + `r AS referrer` mapped to `Option<..::Users>`); `posts` toggles a child collection built from a correlated `array_agg` subquery mapped to `Option<Vec<..::Posts>>`. The selectors are orthogonal — all four On/Off combinations yield a valid fixed-shape row — and the posts subquery deliberately avoids GROUP BY so it composes freely with the join. Note both off-branches are the identical literal `NULL`; the generator addresses each block positionally so the two bodies do not collide. No JSON aggregate is used
+///
+/// Query Plan:
+/// === user_optional_referrer_and_posts (base) ===
+/// Sort
+///   Sort Key: u.id
+///   ->  Nested Loop Left Join
+///         ->  Index Scan using users_email_key on users u
+///               Index Cond: ((email)::text = 'dummy'::text)
+///               Filter: ((email)::text ~~ 'dummy'::text)
+///         ->  Index Scan using users_pkey on users r
+///               Index Cond: (id = u.referrer_id)
+///         SubPlan 1
+///           ->  Aggregate
+///                 ->  Index Scan using posts_pkey on posts p
+///                       Filter: (author_id = u.id)
+/// 
+/// === user_optional_referrer_and_posts (variant 1) ===
+/// Sort
+///   Sort Key: u.id
+///   ->  Index Scan using users_email_key on users u
+///         Index Cond: ((email)::text = 'dummy'::text)
+///         Filter: ((email)::text ~~ 'dummy'::text)
+///         SubPlan 1
+///           ->  Aggregate
+///                 ->  Index Scan using posts_pkey on posts p
+///                       Filter: (author_id = u.id)
+/// 
+/// === user_optional_referrer_and_posts (variant 2) ===
+/// Sort
+///   Sort Key: u.id
+///   ->  Nested Loop Left Join
+///         ->  Index Scan using users_email_key on users u
+///               Index Cond: ((email)::text = 'dummy'::text)
+///               Filter: ((email)::text ~~ 'dummy'::text)
+///         ->  Index Scan using users_pkey on users r
+///               Index Cond: (id = u.referrer_id)
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r]#[NULL] AS referrer,\n  #[(SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[NULL] AS posts\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+pub async fn user_optional_referrer_and_posts(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerAndPostsReferrer, posts: UserOptionalReferrerAndPostsPosts) -> Result<Vec<UserOptionalReferrerAndPostsItem>, super::ErrorReadOnly> {
+    let mut final_sql = r"SELECT
+  u.id,
+  u.name,
+  __AM_BLK_0____AM_BLK_1__ AS referrer,
+  __AM_BLK_2____AM_BLK_3__ AS posts
+FROM public.users u
+__AM_BLK_4__
+WHERE u.email LIKE $1
+ORDER BY u.id".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
+
+    match &referrer {
+        UserOptionalReferrerAndPostsReferrer::On => {
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"r");
+            final_sql = final_sql.replace(r"__AM_BLK_4__", r"LEFT JOIN public.users r ON r.id = u.referrer_id");
+        }
+        UserOptionalReferrerAndPostsReferrer::Off => {
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
+        }
+    }
+    match &posts {
+        UserOptionalReferrerAndPostsPosts::On => {
+            final_sql = final_sql.replace(r"__AM_BLK_2__", r"(SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)");
+        }
+        UserOptionalReferrerAndPostsPosts::Off => {
+            final_sql = final_sql.replace(r"__AM_BLK_3__", r"NULL");
+        }
+    }
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_4__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
+
+    #[allow(unused_assignments)]
+    let mut param_counter = 1;
+    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
+    param_counter += 1;
+    let _ = param_counter; // Suppress unused assignment warning
+
+    let mut query = sqlx::query(&final_sql);
+
+    query = query.bind(&email_prefix);
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(UserOptionalReferrerAndPostsItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        referrer: row.try_get::<Option<super::types::public::Users>, _>("referrer")?,
+        posts: row.try_get::<Option<Vec<super::types::public::Posts>>, _>("posts")?,
     })
     }).collect();
     result.map_err(Into::into)
@@ -983,86 +1419,69 @@ pub async fn repro_combined_cursor_sort(executor: impl sqlx::Executor<'_, Databa
     let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
 FROM public.users
 WHERE id >= $1
-  #[AND is_active IS TRUE]
-  #[AND is_active IS FALSE]
-  #[AND (name, email) IN (
-      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
-  )]
-  #[AND name = #{name_exact?}]
-  #[AND name LIKE #{name_starts_with?}]
-  #[AND updated_at >= #{updated_from?}]
-  #[AND updated_at <= #{updated_to?}]
-  #[AND EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements(profile->'social_links') AS sl
-      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
-  )]
-  #[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]
-  #[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]
-  #[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]
-  #[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]
+  __AM_BLK_0__
+  __AM_BLK_1__
+  __AM_BLK_2__
+  __AM_BLK_3__
+  __AM_BLK_4__
+  __AM_BLK_5__
+  __AM_BLK_6__
+  __AM_BLK_7__
+  __AM_BLK_8__
+  __AM_BLK_9__
+  __AM_BLK_10__
+  __AM_BLK_11__
 LIMIT $2;".to_string();
-    let mut included_params = Vec::new();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
 
     if req_names.is_some() {
-        final_sql = final_sql.replace(r"#[AND (name, email) IN (
-      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
-  )]", r"AND (name, email) IN (
+        final_sql = final_sql.replace(r"__AM_BLK_2__", r"AND (name, email) IN (
       SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
   )");
         included_params.push("req_names");
         included_params.push("req_emails");
     } else {
-        final_sql = final_sql.replace(r"#[AND (name, email) IN (
-      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
-  )]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_2__", "");
     }
 
     if name_exact.is_some() {
-        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", r"AND name = #{name_exact?}");
+        final_sql = final_sql.replace(r"__AM_BLK_3__", r"AND name = #{name_exact?}");
         included_params.push("name_exact");
     } else {
-        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_3__", "");
     }
 
     if name_starts_with.is_some() {
-        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", r"AND name LIKE #{name_starts_with?}");
+        final_sql = final_sql.replace(r"__AM_BLK_4__", r"AND name LIKE #{name_starts_with?}");
         included_params.push("name_starts_with");
     } else {
-        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_4__", "");
     }
 
     if updated_from.is_some() {
-        final_sql = final_sql.replace(r"#[AND updated_at >= #{updated_from?}]", r"AND updated_at >= #{updated_from?}");
+        final_sql = final_sql.replace(r"__AM_BLK_5__", r"AND updated_at >= #{updated_from?}");
         included_params.push("updated_from");
     } else {
-        final_sql = final_sql.replace(r"#[AND updated_at >= #{updated_from?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_5__", "");
     }
 
     if updated_to.is_some() {
-        final_sql = final_sql.replace(r"#[AND updated_at <= #{updated_to?}]", r"AND updated_at <= #{updated_to?}");
+        final_sql = final_sql.replace(r"__AM_BLK_6__", r"AND updated_at <= #{updated_to?}");
         included_params.push("updated_to");
     } else {
-        final_sql = final_sql.replace(r"#[AND updated_at <= #{updated_to?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_6__", "");
     }
 
     if platforms.is_some() {
-        final_sql = final_sql.replace(r"#[AND EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements(profile->'social_links') AS sl
-      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
-  )]", r"AND EXISTS (
+        final_sql = final_sql.replace(r"__AM_BLK_7__", r"AND EXISTS (
       SELECT 1
       FROM jsonb_array_elements(profile->'social_links') AS sl
       WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
   )");
         included_params.push("platforms");
     } else {
-        final_sql = final_sql.replace(r"#[AND EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements(profile->'social_links') AS sl
-      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
-  )]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_7__", "");
     }
 
     let mut cur_ua_asc_ts_cg: Option<&chrono::DateTime<chrono::Utc>> = None;
@@ -1075,37 +1494,37 @@ LIMIT $2;".to_string();
     let mut cur_name_desc_id_cg: Option<&i32> = None;
     match &archived {
         Some(ReproCombinedCursorSortArchived::Active) => {
-            final_sql = final_sql.replace(r"#[AND is_active IS TRUE]", r"AND is_active IS TRUE");
+            final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND is_active IS TRUE");
         }
         Some(ReproCombinedCursorSortArchived::Inactive) => {
-            final_sql = final_sql.replace(r"#[AND is_active IS FALSE]", r"AND is_active IS FALSE");
+            final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND is_active IS FALSE");
         }
         None => {}
     }
     match &sort {
         Some(ReproCombinedCursorSortSort::UaAsc { cur_ua_asc_ts, cur_ua_asc_id }) => {
-            final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]", r"AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC");
+            final_sql = final_sql.replace(r"__AM_BLK_8__", r"AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC");
             cur_ua_asc_ts_cg = Some(cur_ua_asc_ts);
             included_params.push("cur_ua_asc_ts");
             cur_ua_asc_id_cg = Some(cur_ua_asc_id);
             included_params.push("cur_ua_asc_id");
         }
         Some(ReproCombinedCursorSortSort::UaDesc { cur_ua_desc_ts, cur_ua_desc_id }) => {
-            final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]", r"AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC");
+            final_sql = final_sql.replace(r"__AM_BLK_9__", r"AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC");
             cur_ua_desc_ts_cg = Some(cur_ua_desc_ts);
             included_params.push("cur_ua_desc_ts");
             cur_ua_desc_id_cg = Some(cur_ua_desc_id);
             included_params.push("cur_ua_desc_id");
         }
         Some(ReproCombinedCursorSortSort::NameAsc { cur_name_asc_val, cur_name_asc_id }) => {
-            final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]", r"AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC");
+            final_sql = final_sql.replace(r"__AM_BLK_10__", r"AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC");
             cur_name_asc_val_cg = Some(cur_name_asc_val);
             included_params.push("cur_name_asc_val");
             cur_name_asc_id_cg = Some(cur_name_asc_id);
             included_params.push("cur_name_asc_id");
         }
         Some(ReproCombinedCursorSortSort::NameDesc { cur_name_desc_val, cur_name_desc_id }) => {
-            final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]", r"AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC");
+            final_sql = final_sql.replace(r"__AM_BLK_11__", r"AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC");
             cur_name_desc_val_cg = Some(cur_name_desc_val);
             included_params.push("cur_name_desc_val");
             cur_name_desc_id_cg = Some(cur_name_desc_id);
@@ -1113,12 +1532,12 @@ LIMIT $2;".to_string();
         }
         None => {}
     }
-    final_sql = final_sql.replace(r"#[AND is_active IS TRUE]", "");
-    final_sql = final_sql.replace(r"#[AND is_active IS FALSE]", "");
-    final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]", "");
-    final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]", "");
-    final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]", "");
-    final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]", "");
+    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_8__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_9__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_10__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_11__", "");
 
     #[allow(unused_assignments)]
     let mut param_counter = 1;

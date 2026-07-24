@@ -200,10 +200,15 @@ pub(crate) struct QueryDefinition {
 pub(crate) struct ChoiceVariant {
     /// Variant name from the selector directive (e.g. "ua_asc").
     pub variant: String,
-    /// Index of the corresponding conditional block in source order. The matching
-    /// pre-computed SQL lives at `QueryDefinition::sql_variants[block_index + 1]`
-    /// (index 0 is the base variant with all blocks removed).
-    pub block_index: usize,
+    /// Indices, in source order, of the conditional block(s) that make up this
+    /// branch. Most branches map to a single block, but a branch may span
+    /// several blocks when the same `#{selector=variant}` directive is repeated
+    /// (e.g. a projection fragment plus a matching `LEFT JOIN` fragment that
+    /// must switch together). For a single-block branch, the matching
+    /// pre-computed SQL lives at `QueryDefinition::sql_variants[block_indices[0] + 1]`
+    /// (index 0 is the base variant with all blocks removed); multi-block
+    /// branches are always handled by the membership-based body generator.
+    pub block_indices: Vec<usize>,
     /// Clean parameter names (suffixes stripped) referenced *directly* in this
     /// branch (outside any nested optional block), in source order, excluding the
     /// selector directive itself. These become mandatory (non-`Option`) enum

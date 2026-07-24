@@ -560,6 +560,7 @@ let page = get_users_multi_sort_cursor(
 - A query may declare **multiple independent choice groups** (see below); each distinct selector name becomes its own enum argument.
 - A choice group may **coexist with additive `#[...]` blocks** in the same query (see below); blocks without a directive keep their additive `Option<T>` behavior.
 - A branch may contain **nested additive `#[...]` blocks** (see below); their parameters become `Option<T>` fields, included only when `Some(...)`.
+- A single branch may **span multiple blocks** (see below): repeat its directive on each fragment that must switch together — e.g. an output column and its matching `JOIN` — and they are included or dropped as a unit.
 - All branches of a group must use the **same** optionality marker (`!` or `?`).
 - Variant names within a group must be unique.
 - A parameter may belong to **at most one** choice group (it cannot be shared across two different groups).
@@ -679,6 +680,72 @@ pub enum FilterUsersFilter {
 ```
 
 Here `want_active` / `floor_age` are always bound (plain fields), while `active_min_age` / `ceil_age` gate their nested predicate and are only applied when `Some(...)`.
+
+#### Coordinated output: conditional columns, joins, and collections
+
+The examples above vary *how a query filters and sorts*. The same selector mechanism can also vary **what a query returns** — including or omitting an output column, a `JOIN`, or a whole nested entity — while keeping the **result shape fixed** (every branch produces the same columns, so no per-branch row mapping is needed).
+
+The enabler is that one branch may **span several blocks**: repeat the *same* `#{selector=variant!}` directive on each fragment that must switch together. AutoModel merges them into a single branch, so a projection fragment and its matching `JOIN` are included or dropped as a unit.
+
+**Conditional column + coordinated join.** A caller flag decides whether each row also carries a value from a self-join; when off, the `LEFT JOIN` is skipped entirely and the column comes back `NULL`:
+
+```sql
+SELECT
+  u.id,
+  u.name,
+  #[#{referrer=on!} r.age]#[#{referrer=off!} NULL] AS referrer_age
+FROM public.users u
+#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+WHERE u.email LIKE #{email_prefix}
+ORDER BY u.id
+```
+
+Both `on` fragments (the `r.age` projection and the `LEFT JOIN`) belong to the same branch, so they toggle together. `referrer_age` is always present in the struct as `Option<i32>`:
+
+```rust
+pub enum UserOptionalReferrerReferrer { On, Off }
+
+pub async fn user_optional_referrer(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    email_prefix: String,
+    referrer: UserOptionalReferrerReferrer,
+) -> Result<Vec<UserOptionalReferrerItem>, /* ... */> { /* ... */ }
+```
+
+> **Author the data branch first** (`on` before `off`): AutoModel infers output types from the first branch that yields columns. Project the off-branch as a literal (`NULL`, or a typed `NULL::some_type`) so the removed join's aliases vanish with it.
+
+**Whole nested entity (composite, no JSON).** Project the entire joined row as a native composite that maps to a generated struct — the field is `Option<T>` because a row expression is inherently nullable:
+
+```sql
+SELECT u.id, u.name,
+  #[#{referrer=on!} r]#[#{referrer=off!} NULL] AS referrer
+FROM public.users u
+#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+WHERE u.email LIKE #{email_prefix}
+-- referrer: Option<types::public::Users>
+```
+
+**Collection of children (no JSON aggregate).** Use `array_agg` over a child table's implicit composite type; it decodes straight into `Vec<Struct>`. :
+
+```sql
+SELECT u.id, u.name,
+  #[#{posts=on!} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off!} NULL] AS posts
+FROM public.users u
+WHERE u.email LIKE #{email_prefix}
+-- posts: Option<Vec<types::public::Posts>>
+```
+
+**Two selectors, one query.** Independent selectors compose freely — every On/Off combination yields a valid, fixed-shape row. Identical `NULL` off-branches across different groups do **not** collide; blocks are matched positionally, not by their body text:
+
+```sql
+SELECT u.id, u.name,
+  #[#{referrer=on!} r]#[#{referrer=off!} NULL] AS referrer,
+  #[#{posts=on!} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off!} NULL] AS posts
+FROM public.users u
+#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+WHERE u.email LIKE #{email_prefix}
+-- args: referrer: ...Referrer, posts: ...Posts  (two independent enums)
+```
 
 ### Non-Null Column Override
 

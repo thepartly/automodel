@@ -35,10 +35,10 @@ docker compose ps  # should show "healthy"
 
 ```bash
 # bash
-export AUTOMODEL_DATABASE_URL="postgresql://postgres:password@localhost:55432/postgres"
+export AUTOMODEL_DATABASE_URL="postgresql://postgres:password@automodel-testdb:5432/postgres"
 
 # fish
-set -x AUTOMODEL_DATABASE_URL "postgresql://postgres:password@localhost:55432/postgres"
+set -x AUTOMODEL_DATABASE_URL "postgresql://postgres:password@automodel-testdb:5432/postgres"
 ```
 
 Note, if you are developing from a container, database URL need to be asjusted to connect to the Postgres container directly
@@ -111,7 +111,7 @@ docker compose down -v
 ```bash
 docker compose up -d && \
   sleep 2 && \
-  export AUTOMODEL_DATABASE_URL="postgresql://postgres:password@localhost:55432/postgres" && \
+  export AUTOMODEL_DATABASE_URL="postgresql://postgres:password@automodel-testdb:5432/postgres" && \
   bash scripts/migrate.sh && \
   cargo run -p example-app
 ```

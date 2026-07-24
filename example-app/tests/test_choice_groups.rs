@@ -4,7 +4,10 @@ use example_app::generated;
 use example_app::generated::choice_groups::{
     CursorOptionalFirstPageSort, DirectAndNestedMixedFilter, DualNestedAgeBoundsSort,
     MultiGroupSearchRange, MultiGroupSearchSort, SearchUsersMixedSort,
-    SelectUsersOptionalSortOrder, SelectUsersSortedSort,
+    SelectUsersOptionalSortOrder, SelectUsersSortedSort, UserOptionalOwnFieldAge,
+    UserOptionalPostsPosts, UserOptionalReferrerAndPostsPosts,
+    UserOptionalReferrerAndPostsReferrer, UserOptionalReferrerFullReferrer,
+    UserOptionalReferrerReferrer,
 };
 
 /// Insert three isolated users whose names sort a < b < c, ages 21 < 22 < 23,
@@ -233,7 +236,11 @@ async fn cursor_optional_first_page_paginates() {
     )
     .await
     .expect("name_asc next page failed");
-    assert_eq!(page2.len(), 1, "only one row should remain after the cursor");
+    assert_eq!(
+        page2.len(),
+        1,
+        "only one row should remain after the cursor"
+    );
     assert_eq!(page2[0].id, c.id);
 
     // Descending first page, no cursor: c, b, a -> capped at 2 -> c, b.
@@ -307,7 +314,10 @@ async fn dual_nested_age_bounds_combinations() {
     )
     .await
     .expect("asc min-only failed");
-    assert_eq!(min_only.iter().map(|r| r.age).collect::<Vec<_>>(), vec![Some(22), Some(23)]);
+    assert_eq!(
+        min_only.iter().map(|r| r.age).collect::<Vec<_>>(),
+        vec![Some(22), Some(23)]
+    );
 
     // Both bounds: 22 <= age <= 22 -> only b.
     let both = generated::choice_groups::dual_nested_age_bounds(
@@ -416,4 +426,277 @@ async fn direct_and_nested_mixed_variants() {
     .expect("by_age floor+ceiling failed");
     assert_eq!(age_band.len(), 1);
     assert_eq!(age_band[0].id, b.id);
+}
+
+/// Coordinated choice group: a single selector drives two fragments that must
+/// switch together — the projection (`r.age` vs literal `NULL`) and the matching
+/// `LEFT JOIN`. `Off` skips the join entirely and returns `NULL` for every row;
+/// `On` runs the join and surfaces the referrer's age. The result shape is fixed
+/// (`referrer_age` is always present as `Option<i32>`), so no row-mapping changes
+/// are needed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinated_optional_join_and_projection() {
+    let pool = common::get_pool().await;
+    let (prefix, rows) = seed(pool).await;
+
+    // Make the middle user (b, age 22) refer to the first user (a, age 21).
+    sqlx::query("UPDATE public.users SET referrer_id = $1 WHERE id = $2")
+        .bind(rows[0].id)
+        .bind(rows[1].id)
+        .execute(pool)
+        .await
+        .expect("set referrer failed");
+
+    // Off: the LEFT JOIN is dropped from the SQL and referrer_age is NULL for all.
+    let off = generated::choice_groups::user_optional_referrer(
+        pool,
+        prefix.clone(),
+        UserOptionalReferrerReferrer::Off,
+    )
+    .await
+    .expect("off select failed");
+    assert_eq!(off.len(), 3);
+    assert!(off.iter().all(|r| r.referrer_age.is_none()));
+
+    // On: the join runs; rows are ordered by u.id (a, b, c). Only b has a
+    // referrer, so it carries a's age (21); a and c have no referrer -> None.
+    let on = generated::choice_groups::user_optional_referrer(
+        pool,
+        prefix,
+        UserOptionalReferrerReferrer::On,
+    )
+    .await
+    .expect("on select failed");
+    assert_eq!(on.len(), 3);
+    assert_eq!(on[0].referrer_age, None);
+    assert_eq!(on[1].referrer_age, Some(21));
+    assert_eq!(on[2].referrer_age, None);
+}
+
+/// Conditional NON-joined projection: the selector flips a single base-table
+/// column (`u.age`) on or off without any join. `On` returns each user's own age;
+/// `Off` returns `NULL`. Each branch is exactly one block, so this rides the
+/// isolated-variant (clean) generator rather than the membership-based one. The
+/// result shape stays fixed (`maybe_age: Option<i32>`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conditional_non_joined_field() {
+    let pool = common::get_pool().await;
+    let (prefix, rows) = seed(pool).await;
+
+    // Off: every row's maybe_age is NULL.
+    let off = generated::choice_groups::user_optional_own_field(
+        pool,
+        prefix.clone(),
+        UserOptionalOwnFieldAge::Off,
+    )
+    .await
+    .expect("off select failed");
+    assert_eq!(off.len(), 3);
+    assert!(off.iter().all(|r| r.maybe_age.is_none()));
+
+    // On: rows are ordered by u.id (a, b, c) with ages 21, 22, 23.
+    let on = generated::choice_groups::user_optional_own_field(
+        pool,
+        prefix,
+        UserOptionalOwnFieldAge::On,
+    )
+    .await
+    .expect("on select failed");
+    assert_eq!(on.len(), 3);
+    assert_eq!(on[0].id, rows[0].id);
+    assert_eq!(on[0].maybe_age, Some(21));
+    assert_eq!(on[1].maybe_age, Some(22));
+    assert_eq!(on[2].maybe_age, Some(23));
+}
+
+/// Conditional WHOLE-entity projection: instead of one column, the selector
+/// returns the entire referrer row as a nested composite (`Option<..::Users>`).
+/// `On` adds the self LEFT JOIN and hydrates the full referrer struct; `Off`
+/// drops the join and returns `None`. No JSON is involved — this is the native
+/// Postgres row type decoded straight into the generated `Users` composite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conditional_whole_referrer_composite() {
+    let pool = common::get_pool().await;
+    let (prefix, rows) = seed(pool).await;
+
+    // Make the middle user (b) refer to the first user (a).
+    sqlx::query("UPDATE public.users SET referrer_id = $1 WHERE id = $2")
+        .bind(rows[0].id)
+        .bind(rows[1].id)
+        .execute(pool)
+        .await
+        .expect("set referrer failed");
+
+    // Off: the join is gone; every referrer is None.
+    let off = generated::choice_groups::user_optional_referrer_full(
+        pool,
+        prefix.clone(),
+        UserOptionalReferrerFullReferrer::Off,
+    )
+    .await
+    .expect("off select failed");
+    assert_eq!(off.len(), 3);
+    assert!(off.iter().all(|r| r.referrer.is_none()));
+
+    // On: only b has a referrer, and it carries a's full row (id, name, age).
+    let on = generated::choice_groups::user_optional_referrer_full(
+        pool,
+        prefix,
+        UserOptionalReferrerFullReferrer::On,
+    )
+    .await
+    .expect("on select failed");
+    assert_eq!(on.len(), 3);
+    assert!(on[0].referrer.is_none());
+    assert!(on[2].referrer.is_none());
+    let referrer = on[1].referrer.as_ref().expect("b should have a referrer");
+    assert_eq!(referrer.id, rows[0].id);
+    assert_eq!(referrer.name, rows[0].name);
+    assert_eq!(referrer.age, Some(21));
+}
+
+/// Conditional CHILD COLLECTION without a JSON aggregate: the selector drives a
+/// three-fragment coordinated branch (projection + LEFT JOIN + GROUP BY). `On`
+/// builds `array_agg(p)` over the child table's implicit composite type, decoding
+/// straight into `Vec<..::Posts>`; `Off` drops all three fragments and returns
+/// `None`. Proves a collection of children can be returned natively, no JSON.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conditional_child_collection_composite_array() {
+    let pool = common::get_pool().await;
+    let (prefix, rows) = seed(pool).await;
+
+    // Give the first user (a) two posts and leave b and c without any.
+    for title in ["First post", "Second post"] {
+        sqlx::query("INSERT INTO public.posts (author_id, title) VALUES ($1, $2)")
+            .bind(rows[0].id)
+            .bind(title)
+            .execute(pool)
+            .await
+            .expect("insert post failed");
+    }
+
+    // Off: the join, aggregate and GROUP BY all vanish; posts is None everywhere.
+    let off = generated::choice_groups::user_optional_posts(
+        pool,
+        prefix.clone(),
+        UserOptionalPostsPosts::Off,
+    )
+    .await
+    .expect("off select failed");
+    assert_eq!(off.len(), 3);
+    assert!(off.iter().all(|r| r.posts.is_none()));
+
+    // On: a carries a Vec of its two posts; b and c have no posts so the
+    // FILTER'd array_agg yields NULL -> None.
+    let on =
+        generated::choice_groups::user_optional_posts(pool, prefix, UserOptionalPostsPosts::On)
+            .await
+            .expect("on select failed");
+    assert_eq!(on.len(), 3);
+    assert_eq!(on[0].id, rows[0].id);
+    let posts = on[0].posts.as_ref().expect("a should have posts");
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[0].author_id, rows[0].id);
+    assert_eq!(posts[0].title, "First post");
+    assert_eq!(posts[1].title, "Second post");
+    assert!(on[1].posts.is_none());
+    assert!(on[2].posts.is_none());
+}
+
+/// TWO independent selectors in one query: `referrer` (whole-row composite via a
+/// self LEFT JOIN) and `posts` (child collection via a correlated `array_agg`
+/// subquery). The selectors are orthogonal, so all four On/Off combinations must
+/// produce a valid fixed-shape row with each field hydrated or `None`
+/// independently of the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_selectors_referrer_and_posts() {
+    let pool = common::get_pool().await;
+    let (prefix, rows) = seed(pool).await;
+
+    // b refers to a; a owns two posts. b and c have neither referrer nor posts.
+    sqlx::query("UPDATE public.users SET referrer_id = $1 WHERE id = $2")
+        .bind(rows[0].id)
+        .bind(rows[1].id)
+        .execute(pool)
+        .await
+        .expect("set referrer failed");
+    for title in ["First post", "Second post"] {
+        sqlx::query("INSERT INTO public.posts (author_id, title) VALUES ($1, $2)")
+            .bind(rows[0].id)
+            .bind(title)
+            .execute(pool)
+            .await
+            .expect("insert post failed");
+    }
+
+    // Off/Off: both columns are NULL for every row.
+    let off_off = generated::choice_groups::user_optional_referrer_and_posts(
+        pool,
+        prefix.clone(),
+        UserOptionalReferrerAndPostsReferrer::Off,
+        UserOptionalReferrerAndPostsPosts::Off,
+    )
+    .await
+    .expect("off/off select failed");
+    assert_eq!(off_off.len(), 3);
+    assert!(off_off
+        .iter()
+        .all(|r| r.referrer.is_none() && r.posts.is_none()));
+
+    // On/Off: referrer hydrated (only b), posts always None.
+    let on_off = generated::choice_groups::user_optional_referrer_and_posts(
+        pool,
+        prefix.clone(),
+        UserOptionalReferrerAndPostsReferrer::On,
+        UserOptionalReferrerAndPostsPosts::Off,
+    )
+    .await
+    .expect("on/off select failed");
+    assert_eq!(on_off.len(), 3);
+    assert!(on_off.iter().all(|r| r.posts.is_none()));
+    assert!(on_off[0].referrer.is_none());
+    assert_eq!(on_off[1].referrer.as_ref().map(|r| r.id), Some(rows[0].id));
+    assert!(on_off[2].referrer.is_none());
+
+    // Off/On: posts hydrated (only a), referrer always None.
+    let off_on = generated::choice_groups::user_optional_referrer_and_posts(
+        pool,
+        prefix.clone(),
+        UserOptionalReferrerAndPostsReferrer::Off,
+        UserOptionalReferrerAndPostsPosts::On,
+    )
+    .await
+    .expect("off/on select failed");
+    assert_eq!(off_on.len(), 3);
+    assert!(off_on.iter().all(|r| r.referrer.is_none()));
+    assert_eq!(off_on[0].posts.as_ref().map(|p| p.len()), Some(2));
+    assert!(off_on[1].posts.is_none());
+    assert!(off_on[2].posts.is_none());
+
+    // On/On: both selectors active and independent.
+    let on_on = generated::choice_groups::user_optional_referrer_and_posts(
+        pool,
+        prefix,
+        UserOptionalReferrerAndPostsReferrer::On,
+        UserOptionalReferrerAndPostsPosts::On,
+    )
+    .await
+    .expect("on/on select failed");
+    assert_eq!(on_on.len(), 3);
+    // a: no referrer, two posts.
+    assert!(on_on[0].referrer.is_none());
+    let a_posts = on_on[0].posts.as_ref().expect("a should have posts");
+    assert_eq!(a_posts.len(), 2);
+    assert_eq!(a_posts[0].title, "First post");
+    // b: referrer is a, no posts.
+    let b_referrer = on_on[1]
+        .referrer
+        .as_ref()
+        .expect("b should have a referrer");
+    assert_eq!(b_referrer.id, rows[0].id);
+    assert_eq!(b_referrer.age, Some(21));
+    assert!(on_on[1].posts.is_none());
+    // c: neither.
+    assert!(on_on[2].referrer.is_none());
+    assert!(on_on[2].posts.is_none());
 }

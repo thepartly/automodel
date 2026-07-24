@@ -195,13 +195,6 @@ fn extract_choice_groups(sql: &str) -> Result<(String, Vec<ChoiceGroup>)> {
                     _ => {}
                 }
                 let group_variants = variants_by_selector.entry(selector.clone()).or_default();
-                if group_variants.iter().any(|v| v.variant == variant) {
-                    anyhow::bail!(
-                        "Choice-group selector '{}' declares duplicate variant '{}'",
-                        selector,
-                        variant
-                    );
-                }
 
                 // Strip the directive from the block content, keep the rest.
                 let stripped: String = content.chars().skip(directive_len).collect();
@@ -212,12 +205,23 @@ fn extract_choice_groups(sql: &str) -> Result<(String, Vec<ChoiceGroup>)> {
                 let emitted = stripped.trim_start().to_string();
                 let (params, nested_blocks) = split_choice_variant_content(&emitted);
 
-                group_variants.push(ChoiceVariant {
-                    variant,
-                    block_index: this_block_index,
-                    params,
-                    nested_blocks,
-                });
+                // The same `#{selector=variant}` directive may be repeated on
+                // several blocks that must switch together (e.g. an output
+                // projection fragment plus its matching `LEFT JOIN` fragment). In
+                // that case, merge the new block into the existing variant so the
+                // branch spans every fragment.
+                if let Some(existing) = group_variants.iter_mut().find(|v| v.variant == variant) {
+                    existing.block_indices.push(this_block_index);
+                    existing.params.extend(params);
+                    existing.nested_blocks.extend(nested_blocks);
+                } else {
+                    group_variants.push(ChoiceVariant {
+                        variant,
+                        block_indices: vec![this_block_index],
+                        params,
+                        nested_blocks,
+                    });
+                }
 
                 // Emit the cleaned block (directive removed).
                 cleaned.push_str("#[");
@@ -1114,10 +1118,16 @@ mod choice_group_tests {
     }
 
     #[test]
-    fn duplicate_variant_errors() {
+    fn duplicate_variant_merges_into_multiblock() {
+        // Repeating the same `#{selector=variant}` directive merges the blocks
+        // into a single branch that spans every fragment (e.g. a projection
+        // fragment plus a matching JOIN fragment that must switch together).
         let sql = include_str!("../tests/fixtures/choice_groups/invalid_duplicate_variant.sql");
-        let err = extract_choice_groups(sql).unwrap_err().to_string();
-        assert!(err.contains("duplicate variant"), "{}", err);
+        let (_, groups) = extract_choice_groups(sql).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].variants.len(), 1);
+        assert_eq!(groups[0].variants[0].variant, "a");
+        assert_eq!(groups[0].variants[0].block_indices, vec![0, 1]);
     }
 }
 
@@ -1182,8 +1192,7 @@ mod description_quoting_tests {
     fn folds_multiline_plain_description_with_colon() {
         // A continuation line containing ": " would break native YAML folding;
         // quoting the whole scalar keeps it a single string.
-        let yaml =
-            "description: first line\n  second line: with a colon\nexpect: multiple";
+        let yaml = "description: first line\n  second line: with a colon\nexpect: multiple";
         let quoted = quote_plain_description(yaml);
         let value: serde_yaml::Value = serde_yaml::from_str(&quoted).unwrap();
         assert_eq!(value["description"], "first line second line: with a colon");

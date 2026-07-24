@@ -276,16 +276,25 @@ pub(crate) fn generate_explain_variants(
     // Block indices owned by some choice group; every other block is additive.
     let grouped_indices: HashSet<usize> = choice_groups
         .iter()
-        .flat_map(|g| g.variants.iter().map(|v| v.block_index))
+        .flat_map(|g| {
+            g.variants
+                .iter()
+                .flat_map(|v| v.block_indices.iter().copied())
+        })
         .collect();
     let additive: Vec<usize> = (0..block_count)
         .filter(|i| !grouped_indices.contains(i))
         .collect();
 
-    // Default branch per group = its first variant's block index.
-    let default_choice: Vec<usize> = choice_groups
+    // Default branch per group = its first variant's block set.
+    let default_choice: Vec<Vec<usize>> = choice_groups
         .iter()
-        .filter_map(|g| g.variants.first().map(|v| v.block_index))
+        .map(|g| {
+            g.variants
+                .first()
+                .map(|v| v.block_indices.clone())
+                .unwrap_or_default()
+        })
         .collect();
 
     // One selection per (group, variant): vary that group's branch while holding
@@ -296,10 +305,12 @@ pub(crate) fn generate_explain_variants(
         for variant in &group.variants {
             let mut chosen = default_choice.clone();
             if let Some(slot) = chosen.get_mut(gi) {
-                *slot = variant.block_index;
+                *slot = variant.block_indices.clone();
             }
             let mut included: Vec<usize> = additive.clone();
-            included.extend(chosen.iter().copied());
+            for blocks in &chosen {
+                included.extend(blocks.iter().copied());
+            }
             included.sort_unstable();
             included.dedup();
             if seen.insert(included.clone()) {
@@ -335,22 +346,59 @@ pub(crate) fn generate_explain_variants(
 /// removes all others, then converts remaining `#{param}` placeholders to `$N`.
 /// Returns the positional SQL and the ordered parameter names (with suffixes).
 fn build_selected_sql(parsed_sql: &ParsedSql, included: &HashSet<usize>) -> (String, Vec<String>) {
-    let mut sql = parsed_sql.base_sql.clone();
-    for (i, block) in parsed_sql.conditional_blocks.iter().enumerate() {
-        let marker = format!("#[{}]", block.sql_content);
-        if included.contains(&i) {
-            sql = sql.replace(&marker, &block.sql_content);
-        } else {
-            sql = sql.replace(&marker, "");
-        }
-    }
+    // Resolve top-level blocks positionally (by source order) rather than by
+    // body text: two blocks sharing an identical body (e.g. two `NULL`
+    // off-branches in different choice groups) must be included/excluded
+    // independently, which a `String::replace` keyed on `#[NULL]` cannot do.
+    let sql = select_top_level_blocks(&parsed_sql.base_sql, included);
     // Any `#[...]` markers still present are nested optional blocks (Option B)
     // inside an included choice-group branch. For EXPLAIN validation and type
     // extraction we want the fully included ("with cursor") form, so inline them
     // (keep their content, drop the markers). Nested blocks inside an excluded
     // branch were already removed with their parent above.
-    sql = inline_nested_markers(&sql);
+    let sql = inline_nested_markers(&sql);
     convert_named_params_to_positional(&sql)
+}
+
+/// Walk `sql` and resolve each top-level `#[...]` conditional block by its
+/// source-order index: included blocks contribute their raw inner content (which
+/// may still contain nested `#[...]` markers), excluded blocks contribute
+/// nothing. Bracket nesting is honored exactly as in `parse_sql_with_conditionals`
+/// so the emitted indices line up 1:1 with `ParsedSql::conditional_blocks`.
+fn select_top_level_blocks(sql: &str, included: &HashSet<usize>) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut idx = 0usize;
+    while let Some(ch) = chars.next() {
+        if ch == '#' {
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                let mut depth = 1usize;
+                let mut content = String::new();
+                while let Some(inner) = chars.next() {
+                    if inner == '[' {
+                        depth += 1;
+                        content.push(inner);
+                    } else if inner == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        content.push(inner);
+                    } else {
+                        content.push(inner);
+                    }
+                }
+                if included.contains(&idx) {
+                    out.push_str(&content);
+                }
+                idx += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Remove every `#[` / matching `]` marker pair, keeping the inner content, so a

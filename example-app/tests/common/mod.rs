@@ -3,7 +3,7 @@ use sqlx::PgPool;
 
 pub async fn get_pool() -> &'static PgPool {
     let url = std::env::var("AUTOMODEL_DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:password@localhost:55432/postgres".into());
+        .unwrap_or_else(|_| "postgresql://postgres:password@automodel-testdb:5432/postgres".into());
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(2))

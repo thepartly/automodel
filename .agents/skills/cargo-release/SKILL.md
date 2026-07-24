@@ -105,7 +105,7 @@ Replace `X.Y.Z` with the actual version:
 ```bash
 # 1. Run tests (see testing skill for details)
 docker compose up -d
-set -x AUTOMODEL_DATABASE_URL "postgresql://postgres:password@localhost:55432/postgres"
+set -x AUTOMODEL_DATABASE_URL "postgresql://postgres:password@automodel-testdb:5432/postgres"
 bash scripts/migrate.sh
 rm example-app/src/generated/mod.rs
 cargo build -p example-app && cargo test -p example-app

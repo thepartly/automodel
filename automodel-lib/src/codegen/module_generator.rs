@@ -1077,12 +1077,32 @@ fn choice_group_is_mixed(query: &QueryDefinition, type_info: &QueryTypeInfo) -> 
     {
         return true;
     }
+    // Any branch that spans more than one conditional block (e.g. a projection
+    // fragment paired with a matching `LEFT JOIN` fragment) can't be represented
+    // by a single pre-computed `sql_variants` entry, so it needs the
+    // membership-based generator.
+    if query
+        .choice_groups
+        .iter()
+        .any(|g| g.variants.iter().any(|v| v.block_indices.len() > 1))
+    {
+        return true;
+    }
     let total_blocks = type_info
         .parsed_sql
         .as_ref()
         .map(|p| p.conditional_blocks.len())
         .unwrap_or(0);
-    let grouped_blocks: usize = query.choice_groups.iter().map(|g| g.variants.len()).sum();
+    let grouped_blocks: usize = query
+        .choice_groups
+        .iter()
+        .map(|g| {
+            g.variants
+                .iter()
+                .map(|v| v.block_indices.len())
+                .sum::<usize>()
+        })
+        .sum();
     total_blocks > grouped_blocks
 }
 
@@ -1354,7 +1374,7 @@ fn generate_choice_group_function_body(
     body.push_str(&format!("    let sql: &str = match &{} {{\n", selector));
     for variant in &group.variants {
         let pattern = choice_variant_pattern(&enum_name, variant, false);
-        let literal = generate_indented_raw_string_literal(variant_sql(variant.block_index)?);
+        let literal = generate_indented_raw_string_literal(variant_sql(variant.block_indices[0])?);
         let wrapped = if group.required {
             pattern
         } else {
@@ -1388,7 +1408,7 @@ fn generate_choice_group_function_body(
             format!("Some({})", pattern)
         };
         body.push_str(&format!("        {} => {{\n", wrapped));
-        for raw_name in variant_param_names(variant.block_index) {
+        for raw_name in variant_param_names(variant.block_indices[0]) {
             let clean = strip_input_suffix(raw_name);
             let is_variant_field = grouped.contains(&clean);
             push_choice_bind(
@@ -1419,6 +1439,51 @@ fn generate_choice_group_function_body(
 
     generate_query_execution(body, query, type_info, return_type);
     Ok(())
+}
+
+/// Unique, position-based marker for the `i`-th top-level conditional block.
+///
+/// Used by the mixed-choice generator instead of the block's body text so that
+/// two blocks sharing identical bodies (e.g. two `NULL` off-branches in
+/// different choice groups) can still be addressed individually — a plain
+/// `String::replace` keyed on `#[NULL]` would otherwise rewrite *every*
+/// occurrence and corrupt the SQL.
+fn mixed_block_marker(i: usize) -> String {
+    format!("__AM_BLK_{}__", i)
+}
+
+/// Rewrite every top-level `#[...]` conditional block in `sql` into its unique
+/// positional sentinel (`mixed_block_marker`), left-to-right. Bracket nesting is
+/// honored exactly as in `parse_sql_with_conditionals`, so nested `#[...]` inside
+/// a block stay part of that block's body and the emitted indices line up 1:1
+/// with `ParsedSql::conditional_blocks`.
+fn sentinelize_top_level_blocks(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut idx = 0usize;
+    while let Some(ch) = chars.next() {
+        if ch == '#' {
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                let mut depth = 1usize;
+                while let Some(inner) = chars.next() {
+                    if inner == '[' {
+                        depth += 1;
+                    } else if inner == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                out.push_str(&mixed_block_marker(idx));
+                idx += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Generate the function body for a query that combines one or more choice
@@ -1455,7 +1520,7 @@ fn generate_mixed_choice_conditional_body(
     let grouped_block_indices: std::collections::HashSet<usize> = query
         .choice_groups
         .iter()
-        .flat_map(|g| g.variants.iter().map(|v| v.block_index))
+        .flat_map(|g| g.variants.iter().flat_map(|v| v.block_indices.iter().copied()))
         .collect();
     // Every grouped-branch parameter across all groups (clean names), including
     // nested optional-block params (Option B).
@@ -1492,10 +1557,16 @@ fn generate_mixed_choice_conditional_body(
         }
     }
 
+    // Swap every top-level `#[...]` block for its unique positional sentinel so
+    // the include/exclude replacements below target one block at a time, even
+    // when two blocks share identical body text.
+    sql_template = sentinelize_top_level_blocks(&sql_template);
+
     body.push_str("    let mut final_sql = r\"");
     body.push_str(&sql_template);
     body.push_str("\".to_string();\n");
-    body.push_str("    let mut included_params = Vec::new();\n\n");
+    body.push_str("    #[allow(unused_mut, unused_variables)]\n");
+    body.push_str("    let mut included_params: Vec<&str> = Vec::new();\n\n");
 
     // 1. Additive (ungrouped) blocks: include/exclude by their first parameter.
     for (i, block) in parsed_sql.conditional_blocks.iter().enumerate() {
@@ -1503,12 +1574,11 @@ fn generate_mixed_choice_conditional_body(
             continue;
         }
         let clean_gate = block.parameters[0].trim_end_matches('?');
-        let conditional_block = format!("#[{}]", block.sql_content);
+        let marker = mixed_block_marker(i);
         body.push_str(&format!("    if {}.is_some() {{\n", clean_gate));
         body.push_str(&format!(
             "        final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
-            conditional_block,
-            &conditional_block[2..conditional_block.len() - 1]
+            marker, block.sql_content
         ));
         for param_name in &block.parameters {
             body.push_str(&format!(
@@ -1519,7 +1589,7 @@ fn generate_mixed_choice_conditional_body(
         body.push_str("    } else {\n");
         body.push_str(&format!(
             "        final_sql = final_sql.replace(r\"{}\", \"\");\n",
-            conditional_block
+            marker
         ));
         body.push_str("    }\n\n");
     }
@@ -1578,15 +1648,16 @@ fn generate_mixed_choice_conditional_body(
                 format!("Some({})", pattern)
             };
             body.push_str(&format!("        {} => {{\n", arm_pat));
-            // Include the branch's SQL (its content may still contain nested
-            // `#[...]` markers, resolved next).
-            let block = &parsed_sql.conditional_blocks[variant.block_index];
-            let conditional_block = format!("#[{}]", block.sql_content);
-            body.push_str(&format!(
-                "            final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
-                conditional_block,
-                &conditional_block[2..conditional_block.len() - 1]
-            ));
+            // Include every conditional block this branch spans (its content may
+            // still contain nested `#[...]` markers, resolved next).
+            for &bi in &variant.block_indices {
+                let block = &parsed_sql.conditional_blocks[bi];
+                body.push_str(&format!(
+                    "            final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
+                    mixed_block_marker(bi),
+                    block.sql_content
+                ));
+            }
             // Direct fields: stage the reference and mark included unconditionally.
             for f in &fields {
                 if direct.contains(f) {
@@ -1631,12 +1702,12 @@ fn generate_mixed_choice_conditional_body(
     // Remove any grouped block that was not selected (across all groups).
     for group in &query.choice_groups {
         for variant in &group.variants {
-            let block = &parsed_sql.conditional_blocks[variant.block_index];
-            let conditional_block = format!("#[{}]", block.sql_content);
-            body.push_str(&format!(
-                "    final_sql = final_sql.replace(r\"{}\", \"\");\n",
-                conditional_block
-            ));
+            for &bi in &variant.block_indices {
+                body.push_str(&format!(
+                    "    final_sql = final_sql.replace(r\"{}\", \"\");\n",
+                    mixed_block_marker(bi)
+                ));
+            }
         }
     }
     body.push('\n');

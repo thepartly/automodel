@@ -2432,144 +2432,145 @@ pub async fn search_users_filtered(executor: impl sqlx::Executor<'_, Database = 
     let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
 FROM public.users
 WHERE id >= $1
-  #[AND name = #{name_exact?}]              
-  #[AND name LIKE #{name_starts_with?}]      
-  #[AND email = #{email_exact?}]
-  #[AND age >= #{age_from?}]                
-  #[AND age <= #{age_to?}]
-  #[AND is_active = #{is_active?}]
-  #[AND created_at >= #{created_from?}]
-  #[AND created_at <= #{created_to?}]
-  #[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]
-  #[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]
-  #[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]
-  #[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]
-#[LIMIT 100]
-#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]
-#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]
-#[ORDER BY name ASC, id ASC LIMIT #{limit?}]
-#[ORDER BY name DESC, id DESC LIMIT #{limit?}]".to_string();
-    let mut included_params = Vec::new();
+  __AM_BLK_0__              
+  __AM_BLK_1__      
+  __AM_BLK_2__
+  __AM_BLK_3__                
+  __AM_BLK_4__
+  __AM_BLK_5__
+  __AM_BLK_6__
+  __AM_BLK_7__
+  __AM_BLK_8__
+  __AM_BLK_9__
+  __AM_BLK_10__
+  __AM_BLK_11__
+__AM_BLK_12__
+__AM_BLK_13__
+__AM_BLK_14__
+__AM_BLK_15__
+__AM_BLK_16__".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut included_params: Vec<&str> = Vec::new();
 
     if name_exact.is_some() {
-        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", r"AND name = #{name_exact?}");
+        final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND name = #{name_exact?}");
         included_params.push("name_exact");
     } else {
-        final_sql = final_sql.replace(r"#[AND name = #{name_exact?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_0__", "");
     }
 
     if name_starts_with.is_some() {
-        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", r"AND name LIKE #{name_starts_with?}");
+        final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND name LIKE #{name_starts_with?}");
         included_params.push("name_starts_with");
     } else {
-        final_sql = final_sql.replace(r"#[AND name LIKE #{name_starts_with?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_1__", "");
     }
 
     if email_exact.is_some() {
-        final_sql = final_sql.replace(r"#[AND email = #{email_exact?}]", r"AND email = #{email_exact?}");
+        final_sql = final_sql.replace(r"__AM_BLK_2__", r"AND email = #{email_exact?}");
         included_params.push("email_exact");
     } else {
-        final_sql = final_sql.replace(r"#[AND email = #{email_exact?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_2__", "");
     }
 
     if age_from.is_some() {
-        final_sql = final_sql.replace(r"#[AND age >= #{age_from?}]", r"AND age >= #{age_from?}");
+        final_sql = final_sql.replace(r"__AM_BLK_3__", r"AND age >= #{age_from?}");
         included_params.push("age_from");
     } else {
-        final_sql = final_sql.replace(r"#[AND age >= #{age_from?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_3__", "");
     }
 
     if age_to.is_some() {
-        final_sql = final_sql.replace(r"#[AND age <= #{age_to?}]", r"AND age <= #{age_to?}");
+        final_sql = final_sql.replace(r"__AM_BLK_4__", r"AND age <= #{age_to?}");
         included_params.push("age_to");
     } else {
-        final_sql = final_sql.replace(r"#[AND age <= #{age_to?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_4__", "");
     }
 
     if is_active.is_some() {
-        final_sql = final_sql.replace(r"#[AND is_active = #{is_active?}]", r"AND is_active = #{is_active?}");
+        final_sql = final_sql.replace(r"__AM_BLK_5__", r"AND is_active = #{is_active?}");
         included_params.push("is_active");
     } else {
-        final_sql = final_sql.replace(r"#[AND is_active = #{is_active?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_5__", "");
     }
 
     if created_from.is_some() {
-        final_sql = final_sql.replace(r"#[AND created_at >= #{created_from?}]", r"AND created_at >= #{created_from?}");
+        final_sql = final_sql.replace(r"__AM_BLK_6__", r"AND created_at >= #{created_from?}");
         included_params.push("created_from");
     } else {
-        final_sql = final_sql.replace(r"#[AND created_at >= #{created_from?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_6__", "");
     }
 
     if created_to.is_some() {
-        final_sql = final_sql.replace(r"#[AND created_at <= #{created_to?}]", r"AND created_at <= #{created_to?}");
+        final_sql = final_sql.replace(r"__AM_BLK_7__", r"AND created_at <= #{created_to?}");
         included_params.push("created_to");
     } else {
-        final_sql = final_sql.replace(r"#[AND created_at <= #{created_to?}]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_7__", "");
     }
 
     if cursor_ua_asc_ts.is_some() {
-        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", r"AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})");
+        final_sql = final_sql.replace(r"__AM_BLK_8__", r"AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})");
         included_params.push("cursor_ua_asc_ts");
         included_params.push("cursor_ua_asc_id");
     } else {
-        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_8__", "");
     }
 
     if cursor_ua_desc_ts.is_some() {
-        final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]", r"AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})");
+        final_sql = final_sql.replace(r"__AM_BLK_9__", r"AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})");
         included_params.push("cursor_ua_desc_ts");
         included_params.push("cursor_ua_desc_id");
     } else {
-        final_sql = final_sql.replace(r"#[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_9__", "");
     }
 
     if cursor_name_asc_val.is_some() {
-        final_sql = final_sql.replace(r"#[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]", r"AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})");
+        final_sql = final_sql.replace(r"__AM_BLK_10__", r"AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})");
         included_params.push("cursor_name_asc_val");
         included_params.push("cursor_name_asc_id");
     } else {
-        final_sql = final_sql.replace(r"#[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_10__", "");
     }
 
     if cursor_name_desc_val.is_some() {
-        final_sql = final_sql.replace(r"#[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]", r"AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})");
+        final_sql = final_sql.replace(r"__AM_BLK_11__", r"AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})");
         included_params.push("cursor_name_desc_val");
         included_params.push("cursor_name_desc_id");
     } else {
-        final_sql = final_sql.replace(r"#[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]", "");
+        final_sql = final_sql.replace(r"__AM_BLK_11__", "");
     }
 
     let mut limit_cg: Option<&i64> = None;
     match &sort {
         SearchUsersFilteredSort::Unsorted => {
-            final_sql = final_sql.replace(r"#[LIMIT 100]", r"LIMIT 100");
+            final_sql = final_sql.replace(r"__AM_BLK_12__", r"LIMIT 100");
         }
         SearchUsersFilteredSort::UaAsc { limit } => {
-            final_sql = final_sql.replace(r"#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]", r"ORDER BY updated_at ASC, id ASC LIMIT #{limit?}");
+            final_sql = final_sql.replace(r"__AM_BLK_13__", r"ORDER BY updated_at ASC, id ASC LIMIT #{limit?}");
             limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersFilteredSort::UaDesc { limit } => {
-            final_sql = final_sql.replace(r"#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]", r"ORDER BY updated_at DESC, id DESC LIMIT #{limit?}");
+            final_sql = final_sql.replace(r"__AM_BLK_14__", r"ORDER BY updated_at DESC, id DESC LIMIT #{limit?}");
             limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersFilteredSort::NameAsc { limit } => {
-            final_sql = final_sql.replace(r"#[ORDER BY name ASC, id ASC LIMIT #{limit?}]", r"ORDER BY name ASC, id ASC LIMIT #{limit?}");
+            final_sql = final_sql.replace(r"__AM_BLK_15__", r"ORDER BY name ASC, id ASC LIMIT #{limit?}");
             limit_cg = Some(limit);
             included_params.push("limit");
         }
         SearchUsersFilteredSort::NameDesc { limit } => {
-            final_sql = final_sql.replace(r"#[ORDER BY name DESC, id DESC LIMIT #{limit?}]", r"ORDER BY name DESC, id DESC LIMIT #{limit?}");
+            final_sql = final_sql.replace(r"__AM_BLK_16__", r"ORDER BY name DESC, id DESC LIMIT #{limit?}");
             limit_cg = Some(limit);
             included_params.push("limit");
         }
     }
-    final_sql = final_sql.replace(r"#[LIMIT 100]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY name ASC, id ASC LIMIT #{limit?}]", "");
-    final_sql = final_sql.replace(r"#[ORDER BY name DESC, id DESC LIMIT #{limit?}]", "");
+    final_sql = final_sql.replace(r"__AM_BLK_12__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_13__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_14__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_15__", "");
+    final_sql = final_sql.replace(r"__AM_BLK_16__", "");
 
     #[allow(unused_assignments)]
     let mut param_counter = 1;
