@@ -2,13 +2,12 @@ mod common;
 
 use example_app::generated;
 use example_app::generated::choice_groups::{
-    ChoiceGroupBorrowedArrayNameFilter, ChoiceGroupBorrowedArraySort,
-    CursorOptionalFirstPageSort, DirectAndNestedMixedFilter, DualNestedAgeBoundsSort,
-    MultiGroupSearchRange, MultiGroupSearchSort, SearchUsersMixedSort,
-    SelectUsersOptionalSortOrder, SelectUsersSortedSort, UserOptionalOwnFieldAge,
-    UserOptionalPostsPosts, UserOptionalReferrerAndPostsPosts,
-    UserOptionalReferrerAndPostsReferrer, UserOptionalReferrerFullReferrer,
-    UserOptionalReferrerReferrer,
+    ChoiceGroupBorrowedArrayNameFilter, ChoiceGroupBorrowedArraySort, CursorOptionalFirstPageSort,
+    DirectAndNestedMixedFilter, DualNestedAgeBoundsSort, MultiGroupSearchRange,
+    MultiGroupSearchSort, SearchUsersMixedSort, SelectUsersOptionalSortOrder,
+    SelectUsersSortedSort, UserOptionalOwnFieldAge, UserOptionalPostsPosts,
+    UserOptionalReferrerAndPostsPosts, UserOptionalReferrerAndPostsReferrer,
+    UserOptionalReferrerFullReferrer, UserOptionalReferrerReferrer,
 };
 
 /// Insert three isolated users whose names sort a < b < c, ages 21 < 22 < 23,
@@ -101,7 +100,11 @@ async fn choice_group_binds_borrowed_array_params() {
     .await
     .expect("borrowed-array choice group failed");
 
-    assert_eq!(out.len(), 2, "UNNEST membership should match exactly two rows");
+    assert_eq!(
+        out.len(),
+        2,
+        "UNNEST membership should match exactly two rows"
+    );
     assert_eq!(out[0].id, rows[0].id, "NAsc orders by name ascending");
     assert_eq!(out[1].id, rows[1].id);
 }

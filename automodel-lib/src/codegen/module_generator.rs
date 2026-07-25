@@ -1309,9 +1309,11 @@ fn choice_group_needs_lifetime(
     type_map: &std::collections::HashMap<String, InputParam>,
 ) -> bool {
     group.variants.iter().any(|v| {
-        v.all_params()
-            .iter()
-            .any(|p| type_map.get(p).is_some_and(|ip| type_has_borrow(ip.rust_type())))
+        v.all_params().iter().any(|p| {
+            type_map
+                .get(p)
+                .is_some_and(|ip| type_has_borrow(ip.rust_type()))
+        })
     })
 }
 
