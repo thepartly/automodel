@@ -265,7 +265,7 @@ pub enum MultiGroupSearchSort {
 /// Limit
 ///   ->  Sort
 ///         Sort Key: id
-///         ->  Index Scan using idx_users_age_updated_at on users
+///         ->  Index Scan using idx_users_age on users
 ///               Index Cond: (age <= 0)
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 /// 
@@ -982,6 +982,127 @@ ORDER BY u.id");
         name: row.try_get::<String, _>("name")?,
         referrer: row.try_get::<Option<super::types::public::Users>, _>("referrer")?,
         posts: row.try_get::<Option<Vec<super::types::public::Posts>>, _>("posts")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct ChoiceGroupBorrowedArrayItem {
+    pub id: i32,
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ChoiceGroupBorrowedArrayNameFilter<'q> {
+    Lookup {
+        req_names: &'q [&'q str],
+        req_emails: &'q [&'q str],
+    },
+    Exact {
+        name_exact: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ChoiceGroupBorrowedArraySort {
+    NAsc {
+        cur_name: Option<String>,
+        cur_id: Option<i32>,
+    },
+    NDesc,
+}
+
+/// Choice group whose branch binds borrowed (&[&str]) native array params inside an UNNEST subquery, exercising lifetime-generic selector enums
+///
+/// Query Plan:
+/// === choice_group_borrowed_array (base) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: users.name, users.id
+///         ->  Nested Loop
+///               ->  HashAggregate
+///                     Group Key: unnest.unnest, unnest.unnest_1
+///                     ->  Function Scan on unnest
+///               ->  Index Scan using users_email_key on users
+///                     Index Cond: ((email)::text = unnest.unnest_1)
+///                     Filter: ((age > 0) AND (unnest.unnest = (name)::text) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)))
+/// 
+/// === choice_group_borrowed_array (variant 1) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: id
+///         ->  Bitmap Heap Scan on users
+///               Recheck Cond: (age > 0)
+///               Filter: (((name)::text = 'dummy'::text) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)))
+///               ->  Bitmap Index Scan on idx_users_age
+///                     Index Cond: (age > 0)
+/// 
+/// === choice_group_borrowed_array (variant 2) ===
+/// Limit
+///   ->  Sort
+///         Sort Key: users.name DESC, users.id DESC
+///         ->  Nested Loop
+///               ->  HashAggregate
+///                     Group Key: unnest.unnest, unnest.unnest_1
+///                     ->  Function Scan on unnest
+///               ->  Index Scan using users_email_key on users
+///                     Index Cond: ((email)::text = unnest.unnest_1)
+///                     Filter: ((age > 0) AND (unnest.unnest = (name)::text))
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email\nFROM public.users\nWHERE age > #{min_age}\n  #[AND (name, email) IN (\n      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])\n  )]\n  #[AND name = #{name_exact}]\n  #[#[AND (name, id) > (#{cur_name?}, #{cur_id?})] ORDER BY name ASC, id ASC]\n  #[ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
+pub async fn choice_group_borrowed_array<'q>(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_age: i32, lim: i64, name_filter: Option<ChoiceGroupBorrowedArrayNameFilter<'q>>, sort: Option<ChoiceGroupBorrowedArraySort>) -> Result<Vec<ChoiceGroupBorrowedArrayItem>, super::ErrorReadOnly> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email
+FROM public.users
+WHERE age > ");
+    qb.push_bind(&min_age);
+    qb.push(r"
+  ");
+    if let Some(ChoiceGroupBorrowedArrayNameFilter::Lookup { req_names, req_emails, .. }) = &name_filter {
+        qb.push(r"AND (name, email) IN (
+      SELECT * FROM UNNEST(");
+        qb.push_bind(req_names);
+        qb.push(r"::text[], ");
+        qb.push_bind(req_emails);
+        qb.push(r"::text[])
+  )");
+    }
+    qb.push(r"
+  ");
+    if let Some(ChoiceGroupBorrowedArrayNameFilter::Exact { name_exact, .. }) = &name_filter {
+        qb.push(r"AND name = ");
+        qb.push_bind(name_exact);
+    }
+    qb.push(r"
+  ");
+    if let Some(ChoiceGroupBorrowedArraySort::NAsc { cur_name, cur_id, .. }) = &sort {
+        if cur_name.is_some() {
+            qb.push(r"AND (name, id) > (");
+            qb.push_bind(cur_name.as_ref().unwrap());
+            qb.push(r", ");
+            qb.push_bind(cur_id.as_ref().unwrap());
+            qb.push(r")");
+        }
+        qb.push(r" ORDER BY name ASC, id ASC");
+    }
+    qb.push(r"
+  ");
+    if let Some(ChoiceGroupBorrowedArraySort::NDesc) = &sort {
+        qb.push(r"ORDER BY name DESC, id DESC");
+    }
+    qb.push(r"
+LIMIT ");
+    qb.push_bind(&lim);
+    qb.push(r";");
+    let query = qb.build();
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(ChoiceGroupBorrowedArrayItem {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<String, _>("name")?,
+        email: row.try_get::<String, _>("email")?,
     })
     }).collect();
     result.map_err(Into::into)

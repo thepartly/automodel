@@ -2,6 +2,7 @@ mod common;
 
 use example_app::generated;
 use example_app::generated::choice_groups::{
+    ChoiceGroupBorrowedArrayNameFilter, ChoiceGroupBorrowedArraySort,
     CursorOptionalFirstPageSort, DirectAndNestedMixedFilter, DualNestedAgeBoundsSort,
     MultiGroupSearchRange, MultiGroupSearchSort, SearchUsersMixedSort,
     SelectUsersOptionalSortOrder, SelectUsersSortedSort, UserOptionalOwnFieldAge,
@@ -67,6 +68,42 @@ async fn pure_choice_group_with_shared_page() {
     assert_eq!(desc.len(), 2);
     assert_eq!(desc[0].id, rows[2].id);
     assert_eq!(desc[1].id, rows[1].id);
+}
+
+/// Regression: a choice-group branch that binds borrowed native array params
+/// (`&[&str]`) inside an UNNEST subquery. Its selector enum must be generic over
+/// a lifetime; before the fix the generated enum used bare `&[&str]` fields and
+/// failed to compile (missing lifetime specifier). Borrow-free branches/enums
+/// (the `sort` group here) stay non-generic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn choice_group_binds_borrowed_array_params() {
+    let pool = common::get_pool().await;
+    let (_prefix, rows) = seed(pool).await;
+
+    // Borrowed slices whose contents must outlive the query builder: pair the
+    // first two seeded users row-wise so UNNEST(names, emails) yields (a) and (b).
+    let names: Vec<&str> = vec![rows[0].name.as_str(), rows[1].name.as_str()];
+    let emails: Vec<&str> = vec![rows[0].email.as_str(), rows[1].email.as_str()];
+
+    let out = generated::choice_groups::choice_group_borrowed_array(
+        pool,
+        0,
+        10,
+        Some(ChoiceGroupBorrowedArrayNameFilter::Lookup {
+            req_names: &names,
+            req_emails: &emails,
+        }),
+        Some(ChoiceGroupBorrowedArraySort::NAsc {
+            cur_name: None,
+            cur_id: None,
+        }),
+    )
+    .await
+    .expect("borrowed-array choice group failed");
+
+    assert_eq!(out.len(), 2, "UNNEST membership should match exactly two rows");
+    assert_eq!(out[0].id, rows[0].id, "NAsc orders by name ascending");
+    assert_eq!(out[1].id, rows[1].id);
 }
 
 /// Optional choice group: `None` selects the base query (no ORDER BY), while

@@ -1026,9 +1026,19 @@ pub fn generate_function_code_without_enums(
         }
     };
 
+    // A choice-group query whose selector enum carries borrowed fields must make
+    // the function generic over that lifetime so the enum argument is nameable.
+    let fn_lifetime_generics = if !choice_groups.is_empty()
+        && any_choice_group_needs_lifetime(query, type_info, &choice_groups)
+    {
+        format!("<{}>", CHOICE_GROUP_LIFETIME)
+    } else {
+        String::new()
+    };
+
     code.push_str(&format!(
-        "pub async fn {}({}) -> {} {{\n",
-        query.name, params_str, return_type
+        "pub async fn {}{}({}) -> {} {{\n",
+        query.name, fn_lifetime_generics, params_str, return_type
     ));
 
     // Generate function body
@@ -1282,6 +1292,49 @@ fn choice_group_type_map(
     map
 }
 
+/// True when a rendered Rust type borrows (contains a reference) and therefore
+/// forces the enclosing choice-group enum to be generic over a lifetime. Enum
+/// definitions, unlike function arguments, cannot rely on lifetime elision.
+fn type_has_borrow(ty: &str) -> bool {
+    ty.contains('&')
+}
+
+/// The lifetime name used for choice-group enums that carry borrowed fields.
+const CHOICE_GROUP_LIFETIME: &str = "'q";
+
+/// Whether a single choice group has any variant field whose type borrows, and
+/// so must be generic over [`CHOICE_GROUP_LIFETIME`].
+fn choice_group_needs_lifetime(
+    group: &crate::sql_tree::ChoiceGroup,
+    type_map: &std::collections::HashMap<String, InputParam>,
+) -> bool {
+    group.variants.iter().any(|v| {
+        v.all_params()
+            .iter()
+            .any(|p| type_map.get(p).is_some_and(|ip| type_has_borrow(ip.rust_type())))
+    })
+}
+
+/// Whether any of a query's choice groups needs a lifetime parameter (used to
+/// decide if the generated `async fn` must be generic over the lifetime).
+fn any_choice_group_needs_lifetime(
+    query: &QueryDefinition,
+    type_info: &QueryTypeInfo,
+    groups: &[crate::sql_tree::ChoiceGroup],
+) -> bool {
+    let type_map = choice_group_type_map(query, type_info);
+    groups
+        .iter()
+        .any(|g| choice_group_needs_lifetime(g, &type_map))
+}
+
+/// Rewrite every borrow in a rendered type to carry the choice-group lifetime
+/// (e.g. `&[&str]` -> `&'q [&'q str]`), so it is valid inside a lifetime-generic
+/// enum definition.
+fn annotate_borrows_with_lifetime(ty: &str) -> String {
+    ty.replace('&', &format!("&{} ", CHOICE_GROUP_LIFETIME))
+}
+
 /// Render an input parameter's Rust type honoring `?`/`??` optionality, matching
 /// `generate_input_params_with_names`.
 fn render_choice_param_type(ip: &InputParam) -> String {
@@ -1346,9 +1399,15 @@ fn generate_choice_group_enum_defs(
     let mut code = String::new();
     for group in groups {
         let enum_name = choice_group_enum_name(&query.name, &group.selector);
+        let needs_lifetime = choice_group_needs_lifetime(group, &type_map);
+        let lifetime_params = if needs_lifetime {
+            format!("<{}>", CHOICE_GROUP_LIFETIME)
+        } else {
+            String::new()
+        };
 
         code.push_str("#[derive(Debug, Clone)]\n");
-        code.push_str(&format!("pub enum {} {{\n", enum_name));
+        code.push_str(&format!("pub enum {}{} {{\n", enum_name, lifetime_params));
         for variant in &group.variants {
             // Every parameter in this branch is a field: direct params are
             // mandatory (`T`); nested optional-block params (Option B) are
@@ -1375,6 +1434,13 @@ fn generate_choice_group_enum_defs(
                         .get(f)
                         .map(|ip| ip.rust_type().to_string())
                         .unwrap_or_else(|| "String".to_string());
+                    // Borrowed field types must carry the enum's lifetime so the
+                    // definition is valid Rust (references cannot be elided here).
+                    let base_ty = if needs_lifetime {
+                        annotate_borrows_with_lifetime(&base_ty)
+                    } else {
+                        base_ty
+                    };
                     let ty = if nested.contains(f) {
                         format!("Option<{}>", base_ty)
                     } else {
@@ -1436,10 +1502,15 @@ fn generate_choice_group_signature(
     // Per group: selector enum argument.
     for group in groups {
         let enum_name = choice_group_enum_name(&query.name, &group.selector);
-        let sel_ty = if group.required {
-            enum_name
+        let enum_ref = if choice_group_needs_lifetime(group, &type_map) {
+            format!("{}<{}>", enum_name, CHOICE_GROUP_LIFETIME)
         } else {
-            format!("Option<{}>", enum_name)
+            enum_name
+        };
+        let sel_ty = if group.required {
+            enum_ref
+        } else {
+            format!("Option<{}>", enum_ref)
         };
         parts.push(format!("{}: {}", group.selector, sel_ty));
     }
