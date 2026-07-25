@@ -1,6 +1,6 @@
 [package]
 name = "automodel"
-version = "0.14.1"
+version = "0.14.2"
 edition = "2021"
 description = "AutoModel — SQL-first Reverse ORM for Rust, Built for the greater DX and for the AI Era"
 license = "MIT"
