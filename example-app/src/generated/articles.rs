@@ -43,7 +43,7 @@ pub struct BatchInsertArticlesItem {
 }
 
 /// Batch insert articles with nullable JSONB columns using multiunzip
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.articles (title, metadata, contributors)\nSELECT title, metadata, contributors\nFROM UNNEST(\n        #{title}::text [],\n        #{metadata?}::jsonb [],\n        #{contributors?}::jsonb []\n    ) AS t(title, metadata, contributors)\nRETURNING id, title, metadata, contributors;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "articles/batch_insert_articles", db.query.text = "INSERT INTO public.articles (title, metadata, contributors)\nSELECT title, metadata, contributors\nFROM UNNEST(\n    $1::text [],\n    $2::jsonb [],\n    $3::jsonb []\n  ) AS t(title, metadata, contributors)\nRETURNING id, title, metadata, contributors;"))]
 pub async fn batch_insert_articles(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<BatchInsertArticlesRecord>) -> Result<Vec<BatchInsertArticlesItem>, super::Error<BatchInsertArticlesConstraints>> {
     use itertools::Itertools;
     let query = sqlx::query(
@@ -89,7 +89,7 @@ pub struct GetArticleByIdItem {
 /// Query Plan:
 /// Index Scan using articles_pkey on articles
 ///   Index Cond: (id = 0)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, title, metadata, contributors\nFROM public.articles\nWHERE id = #{id};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "articles/get_article_by_id", db.query.text = "SELECT id, title, metadata, contributors\nFROM public.articles\nWHERE id = $1;"))]
 pub async fn get_article_by_id(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, id: i32) -> Result<GetArticleByIdItem, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, title, metadata, contributors
@@ -149,7 +149,7 @@ pub struct BatchInsertArticlesScalarNativeItem {
 }
 
 /// Batch insert articles with scalar @native JSONB types using multiunzip (regression test for type truncation)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.articles (title, metadata, contributors)\nSELECT title, metadata, contributors\nFROM UNNEST(\n        #{title}::text [],\n        #{metadata?}::jsonb [],\n        #{contributors?}::jsonb []\n    ) AS t(title, metadata, contributors)\nRETURNING id, title, metadata, contributors;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "articles/batch_insert_articles_scalar_native", db.query.text = "INSERT INTO public.articles (title, metadata, contributors)\nSELECT title, metadata, contributors\nFROM UNNEST(\n    $1::text [],\n    $2::jsonb [],\n    $3::jsonb []\n  ) AS t(title, metadata, contributors)\nRETURNING id, title, metadata, contributors;"))]
 pub async fn batch_insert_articles_scalar_native(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<BatchInsertArticlesScalarNativeRecord>) -> Result<Vec<BatchInsertArticlesScalarNativeItem>, super::Error<BatchInsertArticlesScalarNativeConstraints>> {
     use itertools::Itertools;
     let query = sqlx::query(

@@ -36,7 +36,7 @@ pub struct InsertWidgetsBulkItem {
 }
 
 /// Bulk insert widgets using table composite type array with UNNEST
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.widgets (name, weight, metadata)\nSELECT r.name, r.weight, r.metadata\nFROM UNNEST(#{items}::public.widgets[]) AS r(id, name, weight, metadata, created_at)\nRETURNING id, name, weight, metadata"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "widgets/insert_widgets_bulk", db.query.text = "INSERT INTO public.widgets (name, weight, metadata)\nSELECT r.name, r.weight, r.metadata\nFROM UNNEST($1::public.widgets[]) AS r(id, name, weight, metadata, created_at)\nRETURNING id, name, weight, metadata"))]
 pub async fn insert_widgets_bulk(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<super::types::public::Widgets>) -> Result<Vec<InsertWidgetsBulkItem>, super::Error<InsertWidgetsBulkConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.widgets (name, weight, metadata)
@@ -90,7 +90,7 @@ pub struct InsertWidgetsCustomTypeItem {
 }
 
 /// Bulk insert widgets using custom composite type array with UNNEST
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.widgets (name, weight, metadata)\nSELECT r.name, r.weight, r.metadata\nFROM UNNEST(#{items}::public.widget_input[]) AS r(name, weight, metadata)\nRETURNING id, name, weight, metadata"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "widgets/insert_widgets_custom_type", db.query.text = "INSERT INTO public.widgets (name, weight, metadata)\nSELECT r.name, r.weight, r.metadata\nFROM UNNEST($1::public.widget_input[]) AS r(name, weight, metadata)\nRETURNING id, name, weight, metadata"))]
 pub async fn insert_widgets_custom_type(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<super::types::public::WidgetInput>) -> Result<Vec<InsertWidgetsCustomTypeItem>, super::Error<InsertWidgetsCustomTypeConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.widgets (name, weight, metadata)
@@ -124,7 +124,7 @@ pub struct GetAllWidgetsItem {
 ///
 /// Query Plan:
 /// Index Scan using widgets_pkey on widgets
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, weight, metadata, created_at FROM public.widgets ORDER BY id"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "widgets/get_all_widgets", db.query.text = "SELECT id, name, weight, metadata, created_at FROM public.widgets ORDER BY id"))]
 pub async fn get_all_widgets(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<Vec<GetAllWidgetsItem>, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, name, weight, metadata, created_at FROM public.widgets ORDER BY id"
@@ -175,7 +175,7 @@ pub struct InsertWidgetSingleItem {
 }
 
 /// Insert a single widget using a singular composite type parameter
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.widgets (name, weight, metadata)\nSELECT r.name, r.weight, r.metadata\nFROM (SELECT (#{item}::public.widget_input).*) AS r\nRETURNING id, name, weight, metadata"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "widgets/insert_widget_single", db.query.text = "INSERT INTO public.widgets (name, weight, metadata)\nSELECT r.name, r.weight, r.metadata\nFROM (SELECT ($1::public.widget_input).*) AS r\nRETURNING id, name, weight, metadata"))]
 pub async fn insert_widget_single(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, item: super::types::public::WidgetInput) -> Result<InsertWidgetSingleItem, super::Error<InsertWidgetSingleConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.widgets (name, weight, metadata)

@@ -2,7 +2,7 @@
 // @generated
 
 /// Create the public.users table with all necessary fields
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "CREATE TABLE IF NOT EXISTS public.users (\n  id SERIAL PRIMARY KEY,\n  name TEXT NOT NULL,\n  email TEXT UNIQUE NOT NULL,\n  age INTEGER,\n  profile JSONB,\n  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),\n  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n)"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "setup/create_users_table", db.query.text = "CREATE TABLE IF NOT EXISTS public.users (\n id SERIAL PRIMARY KEY,\n name TEXT NOT NULL,\n email TEXT UNIQUE NOT NULL,\n age INTEGER,\n profile JSONB,\n created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),\n updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n)"))]
 pub async fn create_users_table(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<(), super::ErrorReadOnly> {
     let query = sqlx::query(
         r"CREATE TABLE IF NOT EXISTS public.users (

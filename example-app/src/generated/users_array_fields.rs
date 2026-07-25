@@ -48,7 +48,7 @@ pub struct UpdateUserSocialLinksNullableItem {
 }
 
 /// Update user's social links with nullable value
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET social_links = #{social_links?}, updated_at = NOW()\nWHERE id = #{user_id}\nRETURNING id, name, email, social_links;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_social_links_nullable", db.query.text = "UPDATE public.users\nSET social_links = $1, updated_at = NOW()\nWHERE id = $2\nRETURNING id, name, email, social_links;"))]
 pub async fn update_user_social_links_nullable(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, social_links: Option<Vec<crate::models::UserSocialLink>>, user_id: i32) -> Result<UpdateUserSocialLinksNullableItem, super::Error<UpdateUserSocialLinksNullableConstraints>> {
     let query = sqlx::query(
         r"UPDATE public.users
@@ -125,7 +125,7 @@ pub struct InsertUserSocialLinksStructuredItem {
 }
 
 /// Insert user with social links using structured parameters
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.users (name, email, status, social_links)\nVALUES (#{name}, #{email}, 'pending', #{social_links})\nRETURNING id, name, email, social_links;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/insert_user_social_links_structured", db.query.text = "INSERT INTO public.users (name, email, status, social_links)\nVALUES ($1, $2, 'pending', $3)\nRETURNING id, name, email, social_links;"))]
 pub async fn insert_user_social_links_structured(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, params: &InsertUserSocialLinksStructuredParams) -> Result<InsertUserSocialLinksStructuredItem, super::Error<InsertUserSocialLinksStructuredConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.users (name, email, status, social_links)
@@ -201,7 +201,7 @@ pub struct UpdateUserSocialLinksDiffItem {
 }
 
 /// Update user social links with conditional set using diff comparison
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, social_links = #{social_links?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, social_links;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_social_links_diff", db.query.text = tracing::field::Empty))]
 pub async fn update_user_social_links_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserSocialLinksDiffParams, new: &UpdateUserSocialLinksDiffParams, user_id: i32) -> Result<UpdateUserSocialLinksDiffItem, super::Error<UpdateUserSocialLinksDiffConstraints>> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"UPDATE public.users
@@ -222,6 +222,7 @@ WHERE id = ");
     qb.push_bind(&user_id);
     qb.push(r"
 RETURNING id, name, email, social_links;");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
@@ -284,7 +285,7 @@ pub struct UpdateUserSocialLinksConditionalItem {
 }
 
 /// Update user social links with conditional set (no diff struct)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, social_links = #{social_links?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, social_links;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_social_links_conditional", db.query.text = tracing::field::Empty))]
 pub async fn update_user_social_links_conditional(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, social_links: Option<Vec<crate::models::UserSocialLink>>, user_id: i32) -> Result<UpdateUserSocialLinksConditionalItem, super::Error<UpdateUserSocialLinksConditionalConstraints>> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"UPDATE public.users
@@ -305,6 +306,7 @@ WHERE id = ");
     qb.push_bind(&user_id);
     qb.push(r"
 RETURNING id, name, email, social_links;");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
@@ -374,7 +376,7 @@ pub struct InsertUsersBatchSocialLinksItem {
 }
 
 /// Batch insert users with optional social links using multiunzip
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.users (name, email, social_links)\nSELECT name, email, social_links\nFROM UNNEST(\n        #{name}::text [],\n        #{email}::text [],\n        #{social_links?}::jsonb []\n    ) AS t(name, email, social_links)\nRETURNING id, name, email, social_links;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/insert_users_batch_social_links", db.query.text = "INSERT INTO public.users (name, email, social_links)\nSELECT name, email, social_links\nFROM UNNEST(\n    $1::text [],\n    $2::text [],\n    $3::jsonb []\n  ) AS t(name, email, social_links)\nRETURNING id, name, email, social_links;"))]
 pub async fn insert_users_batch_social_links(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<InsertUsersBatchSocialLinksRecord>) -> Result<Vec<InsertUsersBatchSocialLinksItem>, super::Error<InsertUsersBatchSocialLinksConstraints>> {
     use itertools::Itertools;
     let query = sqlx::query(
@@ -456,7 +458,7 @@ pub struct UpdateUserTagsItem {
 }
 
 /// Update user tags (jsonb[] column with nullable elements)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET tags = #{tags}, updated_at = NOW()\nWHERE id = #{user_id}\nRETURNING id, name, email, tags;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_tags", db.query.text = "UPDATE public.users\nSET tags = $1, updated_at = NOW()\nWHERE id = $2\nRETURNING id, name, email, tags;"))]
 pub async fn update_user_tags(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, tags: Vec<Option<crate::models::UserTag>>, user_id: i32) -> Result<UpdateUserTagsItem, super::Error<UpdateUserTagsConstraints>> {
     let query = sqlx::query(
         r"UPDATE public.users
@@ -494,7 +496,7 @@ pub struct GetUserTagsItem {
 /// Query Plan:
 /// Index Scan using users_pkey on users
 ///   Index Cond: (id = 0)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, tags\nFROM public.users\nWHERE id = #{user_id};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/get_user_tags", db.query.text = "SELECT id, name, email, tags\nFROM public.users\nWHERE id = $1;"))]
 pub async fn get_user_tags(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, user_id: i32) -> Result<GetUserTagsItem, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, name, email, tags
@@ -568,7 +570,7 @@ pub struct InsertUserTagsStructuredItem {
 }
 
 /// Insert user with tags using structured parameters (jsonb[] column)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.users (name, email, status, tags)\nVALUES (#{name}, #{email}, 'pending', #{tags})\nRETURNING id, name, email, tags;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/insert_user_tags_structured", db.query.text = "INSERT INTO public.users (name, email, status, tags)\nVALUES ($1, $2, 'pending', $3)\nRETURNING id, name, email, tags;"))]
 pub async fn insert_user_tags_structured(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, params: &InsertUserTagsStructuredParams) -> Result<InsertUserTagsStructuredItem, super::Error<InsertUserTagsStructuredConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.users (name, email, status, tags)
@@ -644,7 +646,7 @@ pub struct UpdateUserTagsDiffItem {
 }
 
 /// Update user tags with conditional diff (jsonb[] column)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, tags = #{tags?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, tags;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_tags_diff", db.query.text = tracing::field::Empty))]
 pub async fn update_user_tags_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserTagsDiffParams, new: &UpdateUserTagsDiffParams, user_id: i32) -> Result<UpdateUserTagsDiffItem, super::Error<UpdateUserTagsDiffConstraints>> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"UPDATE public.users
@@ -666,6 +668,7 @@ WHERE id = ");
     qb.push_bind(&user_id);
     qb.push(r"
 RETURNING id, name, email, tags;");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
@@ -727,7 +730,7 @@ pub struct UpdateUserTagsConditionalItem {
 }
 
 /// Update user tags with conditional set (jsonb[] column, no diff struct)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, tags = #{tags?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, tags;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_tags_conditional", db.query.text = tracing::field::Empty))]
 pub async fn update_user_tags_conditional(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, tags: Option<Vec<Option<crate::models::UserTag>>>, user_id: i32) -> Result<UpdateUserTagsConditionalItem, super::Error<UpdateUserTagsConditionalConstraints>> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"UPDATE public.users
@@ -749,6 +752,7 @@ WHERE id = ");
     qb.push_bind(&user_id);
     qb.push(r"
 RETURNING id, name, email, tags;");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
@@ -817,7 +821,7 @@ pub struct InsertUsersBatchTagsItem {
 }
 
 /// Batch insert users with tags using multiunzip (jsonb[] column)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.users (name, email, tags)\nSELECT name, email,\n    CASE WHEN tags IS NULL THEN NULL\n    ELSE ARRAY(SELECT jsonb_array_elements(tags)) END\nFROM UNNEST(\n        #{name}::text [],\n        #{email}::text [],\n        #{tags}::jsonb []\n    ) AS t(name, email, tags)\nRETURNING id, name, email, tags;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/insert_users_batch_tags", db.query.text = "INSERT INTO public.users (name, email, tags)\nSELECT name, email,\n  CASE WHEN tags IS NULL THEN NULL\n  ELSE ARRAY(SELECT jsonb_array_elements(tags)) END\nFROM UNNEST(\n    $1::text [],\n    $2::text [],\n    $3::jsonb []\n  ) AS t(name, email, tags)\nRETURNING id, name, email, tags;"))]
 pub async fn insert_users_batch_tags(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<InsertUsersBatchTagsRecord>) -> Result<Vec<InsertUsersBatchTagsItem>, super::Error<InsertUsersBatchTagsConstraints>> {
     use itertools::Itertools;
     let query = sqlx::query(
@@ -900,7 +904,7 @@ pub struct UpdateUserLabelsItem {
 }
 
 /// Update user labels (required jsonb[] column with nullable elements)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET labels = #{labels}, updated_at = NOW()\nWHERE id = #{user_id}\nRETURNING id, name, email, labels;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_labels", db.query.text = "UPDATE public.users\nSET labels = $1, updated_at = NOW()\nWHERE id = $2\nRETURNING id, name, email, labels;"))]
 pub async fn update_user_labels(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, labels: Vec<Option<crate::models::UserTag>>, user_id: i32) -> Result<UpdateUserLabelsItem, super::Error<UpdateUserLabelsConstraints>> {
     let query = sqlx::query(
         r"UPDATE public.users
@@ -937,7 +941,7 @@ pub struct GetUserLabelsItem {
 /// Query Plan:
 /// Index Scan using users_pkey on users
 ///   Index Cond: (id = 0)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, labels\nFROM public.users\nWHERE id = #{user_id};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/get_user_labels", db.query.text = "SELECT id, name, email, labels\nFROM public.users\nWHERE id = $1;"))]
 pub async fn get_user_labels(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, user_id: i32) -> Result<GetUserLabelsItem, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, name, email, labels
@@ -1010,7 +1014,7 @@ pub struct InsertUserLabelsStructuredItem {
 }
 
 /// Insert user with labels using structured parameters (required jsonb[] column)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.users (name, email, status, labels)\nVALUES (#{name}, #{email}, 'pending', #{labels})\nRETURNING id, name, email, labels;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/insert_user_labels_structured", db.query.text = "INSERT INTO public.users (name, email, status, labels)\nVALUES ($1, $2, 'pending', $3)\nRETURNING id, name, email, labels;"))]
 pub async fn insert_user_labels_structured(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, params: &InsertUserLabelsStructuredParams) -> Result<InsertUserLabelsStructuredItem, super::Error<InsertUserLabelsStructuredConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.users (name, email, status, labels)
@@ -1085,7 +1089,7 @@ pub struct UpdateUserLabelsDiffItem {
 }
 
 /// Update user labels with conditional diff (required jsonb[] column)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, labels = #{labels?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, labels;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_labels_diff", db.query.text = tracing::field::Empty))]
 pub async fn update_user_labels_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserLabelsDiffParams, new: &UpdateUserLabelsDiffParams, user_id: i32) -> Result<UpdateUserLabelsDiffItem, super::Error<UpdateUserLabelsDiffConstraints>> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"UPDATE public.users
@@ -1107,6 +1111,7 @@ WHERE id = ");
     qb.push_bind(&user_id);
     qb.push(r"
 RETURNING id, name, email, labels;");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
@@ -1167,7 +1172,7 @@ pub struct UpdateUserLabelsConditionalItem {
 }
 
 /// Update user labels with conditional set (required jsonb[] column, no diff struct)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, labels = #{labels?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, labels;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/update_user_labels_conditional", db.query.text = tracing::field::Empty))]
 pub async fn update_user_labels_conditional(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, labels: Option<Vec<Option<crate::models::UserTag>>>, user_id: i32) -> Result<UpdateUserLabelsConditionalItem, super::Error<UpdateUserLabelsConditionalConstraints>> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"UPDATE public.users
@@ -1189,6 +1194,7 @@ WHERE id = ");
     qb.push_bind(&user_id);
     qb.push(r"
 RETURNING id, name, email, labels;");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
@@ -1256,7 +1262,7 @@ pub struct InsertUsersBatchLabelsItem {
 }
 
 /// Batch insert users with labels using multiunzip (required jsonb[] column)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.users (name, email, labels)\nSELECT name, email,\n    ARRAY(SELECT jsonb_array_elements(labels))\nFROM UNNEST(\n        #{name}::text [],\n        #{email}::text [],\n        #{labels}::jsonb []\n    ) AS t(name, email, labels)\nRETURNING id, name, email, labels;"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/insert_users_batch_labels", db.query.text = "INSERT INTO public.users (name, email, labels)\nSELECT name, email,\n  ARRAY(SELECT jsonb_array_elements(labels))\nFROM UNNEST(\n    $1::text [],\n    $2::text [],\n    $3::jsonb []\n  ) AS t(name, email, labels)\nRETURNING id, name, email, labels;"))]
 pub async fn insert_users_batch_labels(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<InsertUsersBatchLabelsRecord>) -> Result<Vec<InsertUsersBatchLabelsItem>, super::Error<InsertUsersBatchLabelsConstraints>> {
     use itertools::Itertools;
     let query = sqlx::query(
@@ -1337,7 +1343,7 @@ pub struct InsertUsersBulkCompositeItem {
 }
 
 /// Bulk insert users with social links using composite type UNNEST
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.users (name, email, social_links)\nSELECT r.name, r.email, r.social_links\nFROM UNNEST(#{items}::public.user_with_links_input[]) AS r(name, email, social_links)\nRETURNING id, name, email, social_links"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "users_array_fields/insert_users_bulk_composite", db.query.text = "INSERT INTO public.users (name, email, social_links)\nSELECT r.name, r.email, r.social_links\nFROM UNNEST($1::public.user_with_links_input[]) AS r(name, email, social_links)\nRETURNING id, name, email, social_links"))]
 pub async fn insert_users_bulk_composite(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, items: Vec<super::types::public::UserWithLinksInput>) -> Result<Vec<InsertUsersBulkCompositeItem>, super::Error<InsertUsersBulkCompositeConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.users (name, email, social_links)

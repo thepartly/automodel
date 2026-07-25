@@ -43,7 +43,7 @@ pub struct InsertOrderItem {
 }
 
 /// Insert a new order
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.orders (tenant_id, product_name, amount)\nVALUES (#{tenant_id}, #{product_name}, #{amount})\nRETURNING id, tenant_id, product_name, amount, created_at"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "orders/insert_order", db.query.text = "INSERT INTO public.orders (tenant_id, product_name, amount)\nVALUES ($1, $2, $3)\nRETURNING id, tenant_id, product_name, amount, created_at"))]
 pub async fn insert_order(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, tenant_id: i32, product_name: String, amount: rust_decimal::Decimal) -> Result<InsertOrderItem, super::Error<InsertOrderConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.orders (tenant_id, product_name, amount)
@@ -84,7 +84,7 @@ pub struct GetOrdersByTenantItem {
 ///         Recheck Cond: (tenant_id = 0)
 ///         ->  Bitmap Index Scan on orders_p0_pkey
 ///               Index Cond: (tenant_id = 0)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, tenant_id, product_name, amount, created_at\nFROM public.orders\nWHERE tenant_id = #{tenant_id}\nORDER BY created_at DESC"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "orders/get_orders_by_tenant", db.query.text = "SELECT id, tenant_id, product_name, amount, created_at\nFROM public.orders\nWHERE tenant_id = $1\nORDER BY created_at DESC"))]
 pub async fn get_orders_by_tenant(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, tenant_id: i32) -> Result<Vec<GetOrdersByTenantItem>, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, tenant_id, product_name, amount, created_at
@@ -132,7 +132,7 @@ pub struct GetOrdersByProductItem {
 /// JIT:
 ///   Functions: 8
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, tenant_id, product_name, amount, created_at\nFROM public.orders\nWHERE product_name = #{product_name}\nORDER BY created_at DESC"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "orders/get_orders_by_product", db.query.text = "SELECT id, tenant_id, product_name, amount, created_at\nFROM public.orders\nWHERE product_name = $1\nORDER BY created_at DESC"))]
 pub async fn get_orders_by_product(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, product_name: String) -> Result<Vec<GetOrdersByProductItem>, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, tenant_id, product_name, amount, created_at
@@ -183,7 +183,7 @@ pub struct GetOrdersByTenantRangeItem {
 ///               Recheck Cond: (tenant_id > 0)
 ///               ->  Bitmap Index Scan on orders_p3_pkey
 ///                     Index Cond: (tenant_id > 0)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, tenant_id, product_name, amount, created_at\nFROM public.orders\nWHERE tenant_id > #{min_tenant_id}\nORDER BY created_at DESC"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "orders/get_orders_by_tenant_range", db.query.text = "SELECT id, tenant_id, product_name, amount, created_at\nFROM public.orders\nWHERE tenant_id > $1\nORDER BY created_at DESC"))]
 pub async fn get_orders_by_tenant_range(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_tenant_id: i32) -> Result<Vec<GetOrdersByTenantRangeItem>, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, tenant_id, product_name, amount, created_at

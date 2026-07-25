@@ -48,7 +48,7 @@ pub struct InsertProductItem {
 }
 
 /// Insert a product with domain-typed fields
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.products (name, price, contact_email)\nVALUES (#{name}, #{price}, #{contact_email})\nRETURNING id, name, price, contact_email"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "products/insert_product", db.query.text = "INSERT INTO public.products (name, price, contact_email)\nVALUES ($1, $2, $3)\nRETURNING id, name, price, contact_email"))]
 pub async fn insert_product(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: String, price: super::types::public::PositiveInt, contact_email: super::types::public::EmailAddress) -> Result<InsertProductItem, super::Error<InsertProductConstraints>> {
     let query = sqlx::query(
         r"INSERT INTO public.products (name, price, contact_email)
@@ -82,7 +82,7 @@ pub struct GetAllProductsItem {
 ///
 /// Query Plan:
 /// Seq Scan on products
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, price, contact_email FROM public.products"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "products/get_all_products", db.query.text = "SELECT id, name, price, contact_email FROM public.products"))]
 pub async fn get_all_products(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<GetAllProductsItem, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT id, name, price, contact_email FROM public.products"

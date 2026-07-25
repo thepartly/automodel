@@ -38,7 +38,7 @@ pub struct InsertAccountItem {
 }
 
 /// Insert a single account (routed by user_id)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.accounts (user_id, name, balance)\nVALUES (#{user_id}, #{name}, #{balance})\nRETURNING user_id, name, balance"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "accounts/insert_account", db.query.text = "INSERT INTO public.accounts (user_id, name, balance)\nVALUES ($1, $2, $3)\nRETURNING user_id, name, balance"))]
 pub async fn insert_account(sharded: &impl super::ShardedExecutor, user_id: uuid::Uuid, name: String, balance: i64) -> Result<InsertAccountItem, super::Error<InsertAccountConstraints>> {
     let mut __am_conn = sharded.resolve(&user_id).await?;
     let executor = &mut *__am_conn;
@@ -69,7 +69,7 @@ pub struct GetAccountItem {
 }
 
 /// Fetch an account by id (routed by user_id)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT user_id, name, balance\nFROM public.accounts\nWHERE user_id = #{user_id}"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "accounts/get_account", db.query.text = "SELECT user_id, name, balance\nFROM public.accounts\nWHERE user_id = $1"))]
 pub async fn get_account(sharded: &impl super::ShardedExecutor, user_id: uuid::Uuid) -> Result<Option<GetAccountItem>, super::ErrorReadOnly> {
     let mut __am_conn = sharded.resolve(&user_id).await?;
     let executor = &mut *__am_conn;
@@ -130,7 +130,7 @@ pub struct UpdateBalanceItem {
 }
 
 /// Update an account balance (routed by user_id)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.accounts\nSET balance = #{balance}\nWHERE user_id = #{user_id}\nRETURNING user_id, name, balance"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "accounts/update_balance", db.query.text = "UPDATE public.accounts\nSET balance = $1\nWHERE user_id = $2\nRETURNING user_id, name, balance"))]
 pub async fn update_balance(sharded: &impl super::ShardedExecutor, balance: i64, user_id: uuid::Uuid) -> Result<UpdateBalanceItem, super::Error<UpdateBalanceConstraints>> {
     let mut __am_conn = sharded.resolve(&user_id).await?;
     let executor = &mut *__am_conn;
@@ -195,7 +195,7 @@ pub struct InsertAccountsBulkItem {
 }
 
 /// Bulk insert accounts that all belong to the same shard. The generated code verifies every row resolves to the same shard key before routing, returning ShardError::InconsistentBatch otherwise.
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "INSERT INTO public.accounts (user_id, name, balance)\nSELECT * FROM UNNEST(#{user_id}::uuid[], #{name}::text[], #{balance}::bigint[])\nRETURNING user_id, name, balance"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "accounts/insert_accounts_bulk", db.query.text = "INSERT INTO public.accounts (user_id, name, balance)\nSELECT * FROM UNNEST($1::uuid[], $2::text[], $3::bigint[])\nRETURNING user_id, name, balance"))]
 pub async fn insert_accounts_bulk(sharded: &impl super::ShardedExecutor, items: Vec<InsertAccountsBulkRecord>) -> Result<Vec<InsertAccountsBulkItem>, super::Error<InsertAccountsBulkConstraints>> {
     if items.is_empty() {
         return Ok(Vec::new());
@@ -238,7 +238,7 @@ pub struct GetByOwnerItem {
 }
 
 /// Fetch an account, sharding on an explicitly named parameter. Demonstrates the per-query `shard_key` override taking precedence over the global `sharding.shard_key`.
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT user_id, name, balance\nFROM public.accounts\nWHERE user_id = #{owner_id}"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "accounts/get_by_owner", db.query.text = "SELECT user_id, name, balance\nFROM public.accounts\nWHERE user_id = $1"))]
 pub async fn get_by_owner(sharded: &impl super::ShardedExecutor, owner_id: uuid::Uuid) -> Result<Option<GetByOwnerItem>, super::ErrorReadOnly> {
     let mut __am_conn = sharded.resolve(&owner_id).await?;
     let executor = &mut *__am_conn;

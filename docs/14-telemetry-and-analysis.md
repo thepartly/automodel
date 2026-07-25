@@ -28,6 +28,16 @@ let defaults = automodel::DefaultsConfig {
 - `debug` — include the SQL query in the span (if `include_sql` is true)
 - `trace` — include both the SQL query and parameters in the span
 
+**Span fields:** instrumented functions follow OpenTelemetry-aligned field
+names:
+
+- `db.operation.name` — the query's source location (`module/name`), always set.
+- `db.query.text` — the actual statement executed (with `$1, $2 …` placeholders),
+  emitted only when `include_sql` is true. Bound parameter values are never
+  interpolated. For static queries the statement is embedded at compile time; for
+  conditional and choice-group queries — whose SQL is assembled at runtime — it is
+  recorded onto the span after the builder finishes.
+
 ### Per-query telemetry
 
 Override the global settings in a query's metadata block:

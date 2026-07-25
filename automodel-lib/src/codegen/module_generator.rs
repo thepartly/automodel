@@ -448,11 +448,26 @@ fn remove_plan_statistics(line: &str) -> String {
     re.replace_all(line, "").trim_end().to_string()
 }
 
-/// Generate tracing::instrument attribute for a function
+/// Whether the executed SQL should be recorded into the tracing span at runtime.
+/// Only dynamic (conditional/choice) queries need this: their final statement is
+/// assembled at runtime via `QueryBuilder`, so the `db.query.text` field is
+/// declared `Empty` in the attribute and filled in with `Span::record`. Static
+/// queries embed the positional statement directly in the attribute instead.
+fn telemetry_records_sql(query: &QueryDefinition) -> bool {
+    query.telemetry.level != TelemetryLevel::None && query.telemetry.include_sql
+}
+
+/// Generate tracing::instrument attribute for a function.
+///
+/// `is_dynamic` is true when the statement is built at runtime (conditional or
+/// choice-group queries); in that case `db.query.text` is emitted as an empty
+/// field to be recorded at execution time. For static queries the positional
+/// (`$N`) statement actually sent to Postgres is embedded directly.
 fn generate_tracing_attribute(
     query: &QueryDefinition,
     param_names: &[String],
     executor_arg_name: &str,
+    is_dynamic: bool,
 ) -> String {
     use std::collections::HashSet;
 
@@ -523,16 +538,41 @@ fn generate_tracing_attribute(
         attributes.push("skip_all".to_string());
     }
 
-    // Determine whether to include SQL based on configuration (default false)
-    let should_include_sql = query.telemetry.include_sql;
-    if should_include_sql {
-        let escaped_sql = query
-            .tree
-            .template()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n");
-        attributes.push(format!("fields(sql = \"{}\")", escaped_sql));
+    // Custom span fields (OpenTelemetry-aligned names).
+    let mut fields = Vec::new();
+
+    // `db.operation.name` identifies the query source (its module/file location),
+    // giving a stable, low-cardinality name for the operation.
+    fields.push(format!(
+        "db.operation.name = \"{}/{}\"",
+        query.module, query.name
+    ));
+
+    // `db.query.text` carries the actual executed statement when SQL logging is on.
+    if query.telemetry.include_sql {
+        if is_dynamic {
+            // Final SQL is only known once the QueryBuilder assembles it; the value
+            // is recorded at runtime via `Span::current().record(...)`.
+            fields.push("db.query.text = tracing::field::Empty".to_string());
+        } else {
+            // Static queries send a fixed positional (`$N`) statement — embed it.
+            let positional_sql = query
+                .tree
+                .query_variants()
+                .into_iter()
+                .next()
+                .map(|(sql, _, _)| sql)
+                .unwrap_or_else(|| query.tree.template());
+            let escaped_sql = positional_sql
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n");
+            fields.push(format!("db.query.text = \"{}\"", escaped_sql));
+        }
+    }
+
+    if !fields.is_empty() {
+        attributes.push(format!("fields({})", fields.join(", ")));
     }
 
     format!("#[tracing::instrument({})]\n", attributes.join(", "))
@@ -939,9 +979,12 @@ pub fn generate_function_code_without_enums(
     let tracing_attribute = if !choice_groups.is_empty() {
         // Variant fields are not function arguments; only skip real args.
         let arg_names = choice_group_arg_names(query, type_info, &choice_groups);
-        generate_tracing_attribute(query, &arg_names, executor_arg_name)
+        // Choice-group queries always assemble their SQL at runtime.
+        generate_tracing_attribute(query, &arg_names, executor_arg_name, true)
     } else {
-        generate_tracing_attribute(query, &clean_param_names, executor_arg_name)
+        // Conditional queries (top-level blocks) build SQL dynamically too.
+        let is_dynamic = query.tree.top_block_count() > 0;
+        generate_tracing_attribute(query, &clean_param_names, executor_arg_name, is_dynamic)
     };
     code.push_str(&tracing_attribute);
 
@@ -1738,6 +1781,9 @@ fn generate_choice_group_function_body(
         }
     }
 
+    if telemetry_records_sql(query) {
+        body.push_str("    tracing::Span::current().record(\"db.query.text\", qb.sql());\n");
+    }
     body.push_str("    let query = qb.build();\n\n");
 
     generate_query_execution(body, query, type_info, return_type);
@@ -1978,6 +2024,9 @@ fn generate_conditional_function_body(
         }
     }
 
+    if telemetry_records_sql(query) {
+        body.push_str("    tracing::Span::current().record(\"db.query.text\", qb.sql());\n");
+    }
     body.push_str("    let query = qb.build();\n\n");
 
     generate_query_execution(body, query, type_info, return_type);

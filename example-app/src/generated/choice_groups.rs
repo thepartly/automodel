@@ -38,7 +38,7 @@ pub enum SelectUsersSortedSort {
 ///         ->  Index Scan using users_email_key on users
 ///               Index Cond: ((email)::text = 'dummy'::text)
 ///               Filter: ((email)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email\nFROM public.users\nWHERE email LIKE #{email_prefix}\n#[ORDER BY id ASC LIMIT #{page?}]\n#[ORDER BY id DESC LIMIT #{page?}]"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/select_users_sorted", db.query.text = tracing::field::Empty))]
 pub async fn select_users_sorted(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, sort: SelectUsersSortedSort) -> Result<Vec<SelectUsersSortedItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email
@@ -57,6 +57,7 @@ WHERE email LIKE ");
         qb.push(r"ORDER BY id DESC LIMIT ");
         qb.push_bind(page);
     }
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -97,7 +98,7 @@ pub enum SelectUsersOptionalSortOrder {
 /// Index Scan using users_email_key on users
 ///   Index Cond: ((email)::text = 'dummy'::text)
 ///   Filter: ((email)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email\nFROM public.users\nWHERE email LIKE #{email_prefix}\n#[ORDER BY name ASC]\n#[ORDER BY email ASC]"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/select_users_optional_sort", db.query.text = tracing::field::Empty))]
 pub async fn select_users_optional_sort(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, order: Option<SelectUsersOptionalSortOrder>) -> Result<Vec<SelectUsersOptionalSortItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email
@@ -114,6 +115,7 @@ WHERE email LIKE ");
     if let Some(SelectUsersOptionalSortOrder::ByEmail) = &order {
         qb.push(r"ORDER BY email ASC");
     }
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -172,7 +174,7 @@ pub enum SearchUsersMixedSort {
 ///         ->  Index Scan Backward using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((email)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE email LIKE #{email_prefix}\n  #[AND age >= #{min_age?}]\n  #[AND age <= #{max_age?}]\n#[LIMIT 100]\n#[ORDER BY age ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY age DESC, id DESC LIMIT #{limit?}]"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/search_users_mixed", db.query.text = tracing::field::Empty))]
 pub async fn search_users_mixed(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, min_age: Option<i32>, max_age: Option<i32>, sort: SearchUsersMixedSort) -> Result<Vec<SearchUsersMixedItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email, age
@@ -208,6 +210,7 @@ WHERE email LIKE ");
         qb.push(r"ORDER BY age DESC, id DESC LIMIT ");
         qb.push_bind(limit);
     }
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -276,7 +279,7 @@ pub enum MultiGroupSearchSort {
 ///         ->  Index Scan using users_email_key on users
 ///               Index Cond: ((email)::text = 'dummy'::text)
 ///               Filter: (((email)::text ~~ 'dummy'::text) AND (age >= 0))
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE email LIKE #{email_prefix}\n  #[AND age >= #{min_age?}]\n  #[AND age <= #{max_age?}]\n#[ORDER BY id ASC LIMIT #{lim?}]\n#[ORDER BY id DESC LIMIT #{lim?}]"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/multi_group_search", db.query.text = tracing::field::Empty))]
 pub async fn multi_group_search(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, range: Option<MultiGroupSearchRange>, sort: MultiGroupSearchSort) -> Result<Vec<MultiGroupSearchItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email, age
@@ -307,6 +310,7 @@ WHERE email LIKE ");
         qb.push(r"ORDER BY id DESC LIMIT ");
         qb.push_bind(lim);
     }
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -366,7 +370,7 @@ pub enum CursorOptionalFirstPageSort {
 /// JIT:
 ///   Functions: 5
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]\n  #[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/cursor_optional_first_page", db.query.text = tracing::field::Empty))]
 pub async fn cursor_optional_first_page(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, sort: Option<CursorOptionalFirstPageSort>) -> Result<Vec<CursorOptionalFirstPageItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email, age, is_active, created_at, updated_at
@@ -401,6 +405,7 @@ WHERE name LIKE ");
 LIMIT ");
     qb.push_bind(&lim);
     qb.push(r";");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -458,7 +463,7 @@ pub enum DualNestedAgeBoundsSort {
 ///         ->  Index Scan Backward using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((name)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]\n  #[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]\nLIMIT #{lim};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/dual_nested_age_bounds", db.query.text = tracing::field::Empty))]
 pub async fn dual_nested_age_bounds(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, sort: DualNestedAgeBoundsSort) -> Result<Vec<DualNestedAgeBoundsItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email, age
@@ -497,6 +502,7 @@ WHERE name LIKE ");
 LIMIT ");
     qb.push_bind(&lim);
     qb.push(r";");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -552,7 +558,7 @@ pub enum DirectAndNestedMixedFilter {
 ///         ->  Index Scan using idx_users_age_updated_at on users
 ///               Index Cond: ((age >= 0) AND (age <= 0))
 ///               Filter: ((name)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]\n  #[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]\nORDER BY id ASC\nLIMIT #{lim};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/direct_and_nested_mixed", db.query.text = tracing::field::Empty))]
 pub async fn direct_and_nested_mixed(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, filter: DirectAndNestedMixedFilter) -> Result<Vec<DirectAndNestedMixedItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email, age, is_active
@@ -586,6 +592,7 @@ ORDER BY id ASC
 LIMIT ");
     qb.push_bind(&lim);
     qb.push(r";");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -633,7 +640,7 @@ pub enum UserOptionalReferrerReferrer {
 ///   ->  Index Scan using users_email_key on users u
 ///         Index Cond: ((email)::text = 'dummy'::text)
 ///         Filter: ((email)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r.age]#[NULL] AS referrer_age\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/user_optional_referrer", db.query.text = tracing::field::Empty))]
 pub async fn user_optional_referrer(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerReferrer) -> Result<Vec<UserOptionalReferrerItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT
@@ -657,6 +664,7 @@ WHERE u.email LIKE ");
     qb.push_bind(&email_prefix);
     qb.push(r"
 ORDER BY u.id");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -699,7 +707,7 @@ pub enum UserOptionalOwnFieldAge {
 ///   ->  Index Scan using users_email_key on users u
 ///         Index Cond: ((email)::text = 'dummy'::text)
 ///         Filter: ((email)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[u.age]#[NULL] AS maybe_age\nFROM public.users u\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/user_optional_own_field", db.query.text = tracing::field::Empty))]
 pub async fn user_optional_own_field(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, age: UserOptionalOwnFieldAge) -> Result<Vec<UserOptionalOwnFieldItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT
@@ -718,6 +726,7 @@ WHERE u.email LIKE ");
     qb.push_bind(&email_prefix);
     qb.push(r"
 ORDER BY u.id");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -763,7 +772,7 @@ pub enum UserOptionalReferrerFullReferrer {
 ///   ->  Index Scan using users_email_key on users u
 ///         Index Cond: ((email)::text = 'dummy'::text)
 ///         Filter: ((email)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r]#[NULL] AS referrer\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/user_optional_referrer_full", db.query.text = tracing::field::Empty))]
 pub async fn user_optional_referrer_full(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerFullReferrer) -> Result<Vec<UserOptionalReferrerFullItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT
@@ -787,6 +796,7 @@ WHERE u.email LIKE ");
     qb.push_bind(&email_prefix);
     qb.push(r"
 ORDER BY u.id");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -842,7 +852,7 @@ pub enum UserOptionalPostsPosts {
 ///   ->  Index Scan using users_email_key on users u
 ///         Index Cond: ((email)::text = 'dummy'::text)
 ///         Filter: ((email)::text ~~ 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)]#[NULL] AS posts\nFROM public.users u\n#[LEFT JOIN public.posts p ON p.author_id = u.id]\nWHERE u.email LIKE #{email_prefix}\n#[GROUP BY u.id, u.name]\nORDER BY u.id"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/user_optional_posts", db.query.text = tracing::field::Empty))]
 pub async fn user_optional_posts(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, posts: UserOptionalPostsPosts) -> Result<Vec<UserOptionalPostsItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT
@@ -871,6 +881,7 @@ WHERE u.email LIKE ");
     }
     qb.push(r"
 ORDER BY u.id");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -941,7 +952,7 @@ pub enum UserOptionalReferrerAndPostsPosts {
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 ///         ->  Index Scan using users_pkey on users r
 ///               Index Cond: (id = u.referrer_id)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r]#[NULL] AS referrer,\n  #[(SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[NULL] AS posts\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/user_optional_referrer_and_posts", db.query.text = tracing::field::Empty))]
 pub async fn user_optional_referrer_and_posts(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerAndPostsReferrer, posts: UserOptionalReferrerAndPostsPosts) -> Result<Vec<UserOptionalReferrerAndPostsItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT
@@ -973,6 +984,7 @@ WHERE u.email LIKE ");
     qb.push_bind(&email_prefix);
     qb.push(r"
 ORDER BY u.id");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -1050,7 +1062,7 @@ pub enum ChoiceGroupBorrowedArraySort {
 ///               ->  Index Scan using users_email_key on users
 ///                     Index Cond: ((email)::text = unnest.unnest_1)
 ///                     Filter: ((age > 0) AND (unnest.unnest = (name)::text))
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email\nFROM public.users\nWHERE age > #{min_age}\n  #[AND (name, email) IN (\n      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])\n  )]\n  #[AND name = #{name_exact}]\n  #[#[AND (name, id) > (#{cur_name?}, #{cur_id?})] ORDER BY name ASC, id ASC]\n  #[ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/choice_group_borrowed_array", db.query.text = tracing::field::Empty))]
 pub async fn choice_group_borrowed_array<'q>(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_age: i32, lim: i64, name_filter: Option<ChoiceGroupBorrowedArrayNameFilter<'q>>, sort: Option<ChoiceGroupBorrowedArraySort>) -> Result<Vec<ChoiceGroupBorrowedArrayItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email
@@ -1095,6 +1107,7 @@ WHERE age > ");
 LIMIT ");
     qb.push_bind(&lim);
     qb.push(r";");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
@@ -1225,7 +1238,7 @@ pub enum ReproCombinedCursorSortSort {
 ///                             Filter: ((value ->> 'platform'::text) = ANY ('{}'::text[]))
 ///               ->  Function Scan on unnest
 ///                     Filter: (unnest = 'dummy'::text)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE id >= #{min_id}\n  #[AND is_active IS TRUE]\n  #[AND is_active IS FALSE]\n  #[AND (name, email) IN (\n      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])\n  )]\n  #[AND name = #{name_exact?}]\n  #[AND name LIKE #{name_starts_with?}]\n  #[AND updated_at >= #{updated_from?}]\n  #[AND updated_at <= #{updated_to?}]\n  #[AND EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(profile->'social_links') AS sl\n      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])\n  )]\n  #[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]\n  #[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]\n  #[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]\n  #[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/repro_combined_cursor_sort", db.query.text = tracing::field::Empty))]
 pub async fn repro_combined_cursor_sort(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_id: i32, req_names: Option<Vec<String>>, req_emails: Option<Vec<String>>, name_exact: Option<String>, name_starts_with: Option<String>, updated_from: Option<chrono::DateTime<chrono::Utc>>, updated_to: Option<chrono::DateTime<chrono::Utc>>, platforms: Option<Vec<String>>, lim: i64, archived: Option<ReproCombinedCursorSortArchived>, sort: Option<ReproCombinedCursorSortSort>) -> Result<Vec<ReproCombinedCursorSortItem>, super::ErrorReadOnly> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
     qb.push(r"SELECT id, name, email, age, is_active, created_at, updated_at
@@ -1328,6 +1341,7 @@ WHERE id >= ");
 LIMIT ");
     qb.push_bind(&lim);
     qb.push(r";");
+    tracing::Span::current().record("db.query.text", qb.sql());
     let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
