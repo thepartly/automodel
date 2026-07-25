@@ -537,3 +537,7 @@ CREATE INDEX idx_users_tags ON users USING GIN (tags);
 | **jsonb_agg / jsonb_array_elements** | Native | Requires unnest first |
 
 **Recommendation:** Default to `jsonb` with a JSON array inside. Only use `jsonb[]` if you have a specific need for PostgreSQL array semantics (e.g., `array_append`, `array_position`) that outweighs the querying and indexing disadvantages.
+
+---
+
+[Guide Index](README.md) · Related: [Custom Type Mappings](08-custom-types.md) · [Batch Insert with UNNEST](11-batch-insert-unnest.md)
