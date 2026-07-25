@@ -98,68 +98,32 @@ pub async fn update_user_full(executor: impl sqlx::Executor<'_, Database = sqlx:
 /// Partial update using diff-based comparison - auto-generates params struct for old/new comparison
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users \nSET updated_at = NOW() \n#[, name = #{name?}] \n#[, email = #{email?}] \n#[, age = #{age?}] \nWHERE id = #{id} \nRETURNING id, name, email, age"))]
 pub async fn update_user_partial(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UserModel, new: &UserModel, id: i32) -> Result<UserModel, super::Error<UserContentConstraints>> {
-    let mut final_sql = r"UPDATE public.users 
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users 
 SET updated_at = NOW() 
-#[, name = #{name?}] 
-#[, email = #{email?}] 
-#[, age = #{age?}] 
-WHERE id = $1 
-RETURNING id, name, email, age".to_string();
-    let mut included_params = Vec::new();
-
+");
     if old.name != new.name {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(&new.name);
     }
-
+    qb.push(r" 
+");
     if old.email != new.email {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", r", email = #{email?}");
-        included_params.push("email");
-    } else {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", "");
+        qb.push(r", email = ");
+        qb.push_bind(&new.email);
     }
-
+    qb.push(r" 
+");
     if old.age != new.age {
-        final_sql = final_sql.replace(r"#[, age = #{age?}]", r", age = #{age?}");
-        included_params.push("age");
-    } else {
-        final_sql = final_sql.replace(r"#[, age = #{age?}]", "");
+        qb.push(r", age = ");
+        qb.push_bind(&new.age);
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"email") {
-        final_sql = final_sql.replace(r"#{email?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"age") {
-        final_sql = final_sql.replace(r"#{age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&id);
-    if included_params.contains(&r"name") {
-        query = query.bind(&new.name);
-    }
-
-    if included_params.contains(&r"email") {
-        query = query.bind(&new.email);
-    }
-
-    if included_params.contains(&r"age") {
-        query = query.bind(&new.age);
-    }
+    qb.push(r" 
+WHERE id = ");
+    qb.push_bind(&id);
+    qb.push(r" 
+RETURNING id, name, email, age");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -206,52 +170,26 @@ pub async fn find_user_by_email(executor: impl sqlx::Executor<'_, Database = sql
 /// Update user with optional-nullable age - demonstrates ?? suffix for Option<Option<T>>
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users \nSET updated_at = NOW() \n  #[, name = #{name?}] \n  #[, age = #{age??}] \nWHERE id = #{id} \nRETURNING id, name, email, age"))]
 pub async fn update_user_nullable(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, age: Option<Option<i32>>, id: i32) -> Result<UserModel, super::Error<UserContentConstraints>> {
-    let mut final_sql = r"UPDATE public.users 
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users 
 SET updated_at = NOW() 
-  #[, name = #{name?}] 
-  #[, age = #{age??}] 
-WHERE id = $1 
-RETURNING id, name, email, age".to_string();
-    let mut included_params = Vec::new();
-
+  ");
     if name.is_some() {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(name.as_ref().unwrap());
     }
-
+    qb.push(r" 
+  ");
     if age.is_some() {
-        final_sql = final_sql.replace(r"#[, age = #{age??}]", r", age = #{age??}");
-        included_params.push("age");
-    } else {
-        final_sql = final_sql.replace(r"#[, age = #{age??}]", "");
+        qb.push(r", age = ");
+        qb.push_bind(age.as_ref().unwrap());
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"age") {
-        final_sql = final_sql.replace(r"#{age??}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&id);
-    if included_params.contains(&r"name") {
-        query = query.bind(name.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"age") {
-        query = query.bind(age.as_ref().unwrap());
-    }
+    qb.push(r" 
+WHERE id = ");
+    qb.push_bind(&id);
+    qb.push(r" 
+RETURNING id, name, email, age");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {

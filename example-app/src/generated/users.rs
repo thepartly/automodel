@@ -336,56 +336,29 @@ pub struct FindUsersByNameAndAgeItem {
 ///   Filter: (((name)::text ~~* 'dummy'::text) AND ((name)::text = 'dummy'::text))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age \nFROM public.users \nWHERE name ILIKE #{name_pattern} \n#[AND age >= #{min_age?}] \nAND name = #{name_exact} \n#[AND age <= #{max_age?}] \nORDER BY name"))]
 pub async fn find_users_by_name_and_age(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_pattern: String, min_age: Option<i32>, name_exact: String, max_age: Option<i32>) -> Result<Vec<FindUsersByNameAndAgeItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age 
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age 
 FROM public.users 
-WHERE name ILIKE $1 
-#[AND age >= #{min_age?}] 
-AND name = $2 
-#[AND age <= #{max_age?}] 
-ORDER BY name".to_string();
-    let mut included_params = Vec::new();
-
+WHERE name ILIKE ");
+    qb.push_bind(&name_pattern);
+    qb.push(r" 
+");
     if min_age.is_some() {
-        final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", r"AND age >= #{min_age?}");
-        included_params.push("min_age");
-    } else {
-        final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", "");
+        qb.push(r"AND age >= ");
+        qb.push_bind(min_age.as_ref().unwrap());
     }
-
+    qb.push(r" 
+AND name = ");
+    qb.push_bind(&name_exact);
+    qb.push(r" 
+");
     if max_age.is_some() {
-        final_sql = final_sql.replace(r"#[AND age <= #{max_age?}]", r"AND age <= #{max_age?}");
-        included_params.push("max_age");
-    } else {
-        final_sql = final_sql.replace(r"#[AND age <= #{max_age?}]", "");
+        qb.push(r"AND age <= ");
+        qb.push_bind(max_age.as_ref().unwrap());
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{name_pattern}", &format!("${}", param_counter));
-    param_counter += 1;
-    final_sql = final_sql.replace(r"#{name_exact}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"min_age") {
-        final_sql = final_sql.replace(r"#{min_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"max_age") {
-        final_sql = final_sql.replace(r"#{max_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&name_pattern);
-    query = query.bind(&name_exact);
-    if included_params.contains(&r"min_age") {
-        query = query.bind(min_age.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"max_age") {
-        query = query.bind(max_age.as_ref().unwrap());
-    }
+    qb.push(r" 
+ORDER BY name");
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -583,65 +556,30 @@ pub struct SearchUsersAdvancedItem {
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, created_at \nFROM public.users \nWHERE 1=1 \n#[AND name ILIKE #{name_pattern?}] \n#[AND age >= #{min_age?}] \n#[AND created_at >= #{since?}] \nORDER BY created_at DESC"))]
 pub async fn search_users_advanced(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_pattern: Option<String>, min_age: Option<i32>, since: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<SearchUsersAdvancedItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age, created_at 
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age, created_at 
 FROM public.users 
 WHERE 1=1 
-#[AND name ILIKE #{name_pattern?}] 
-#[AND age >= #{min_age?}] 
-#[AND created_at >= #{since?}] 
-ORDER BY created_at DESC".to_string();
-    let mut included_params = Vec::new();
-
+");
     if name_pattern.is_some() {
-        final_sql = final_sql.replace(r"#[AND name ILIKE #{name_pattern?}]", r"AND name ILIKE #{name_pattern?}");
-        included_params.push("name_pattern");
-    } else {
-        final_sql = final_sql.replace(r"#[AND name ILIKE #{name_pattern?}]", "");
+        qb.push(r"AND name ILIKE ");
+        qb.push_bind(name_pattern.as_ref().unwrap());
     }
-
+    qb.push(r" 
+");
     if min_age.is_some() {
-        final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", r"AND age >= #{min_age?}");
-        included_params.push("min_age");
-    } else {
-        final_sql = final_sql.replace(r"#[AND age >= #{min_age?}]", "");
+        qb.push(r"AND age >= ");
+        qb.push_bind(min_age.as_ref().unwrap());
     }
-
+    qb.push(r" 
+");
     if since.is_some() {
-        final_sql = final_sql.replace(r"#[AND created_at >= #{since?}]", r"AND created_at >= #{since?}");
-        included_params.push("since");
-    } else {
-        final_sql = final_sql.replace(r"#[AND created_at >= #{since?}]", "");
+        qb.push(r"AND created_at >= ");
+        qb.push_bind(since.as_ref().unwrap());
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    if included_params.contains(&r"name_pattern") {
-        final_sql = final_sql.replace(r"#{name_pattern?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"min_age") {
-        final_sql = final_sql.replace(r"#{min_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"since") {
-        final_sql = final_sql.replace(r"#{since?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    if included_params.contains(&r"name_pattern") {
-        query = query.bind(name_pattern.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"min_age") {
-        query = query.bind(min_age.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"since") {
-        query = query.bind(since.as_ref().unwrap());
-    }
+    qb.push(r" 
+ORDER BY created_at DESC");
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -806,68 +744,32 @@ pub struct UpdateUserFieldsItem {
 /// Update user fields conditionally - only updates fields that are provided (not None)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users \nSET updated_at = NOW() \n#[, name = #{name?}] \n#[, email = #{email?}] \n#[, age = #{age?}] \nWHERE id = #{user_id} \nRETURNING id, name, email, age, updated_at"))]
 pub async fn update_user_fields(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, email: Option<String>, age: Option<i32>, user_id: i32) -> Result<UpdateUserFieldsItem, super::Error<UpdateUserFieldsConstraints>> {
-    let mut final_sql = r"UPDATE public.users 
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users 
 SET updated_at = NOW() 
-#[, name = #{name?}] 
-#[, email = #{email?}] 
-#[, age = #{age?}] 
-WHERE id = $1 
-RETURNING id, name, email, age, updated_at".to_string();
-    let mut included_params = Vec::new();
-
+");
     if name.is_some() {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(name.as_ref().unwrap());
     }
-
+    qb.push(r" 
+");
     if email.is_some() {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", r", email = #{email?}");
-        included_params.push("email");
-    } else {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", "");
+        qb.push(r", email = ");
+        qb.push_bind(email.as_ref().unwrap());
     }
-
+    qb.push(r" 
+");
     if age.is_some() {
-        final_sql = final_sql.replace(r"#[, age = #{age?}]", r", age = #{age?}");
-        included_params.push("age");
-    } else {
-        final_sql = final_sql.replace(r"#[, age = #{age?}]", "");
+        qb.push(r", age = ");
+        qb.push_bind(age.as_ref().unwrap());
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"email") {
-        final_sql = final_sql.replace(r"#{email?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"age") {
-        final_sql = final_sql.replace(r"#{age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(name.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"email") {
-        query = query.bind(email.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"age") {
-        query = query.bind(age.as_ref().unwrap());
-    }
+    qb.push(r" 
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r" 
+RETURNING id, name, email, age, updated_at");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -937,68 +839,32 @@ pub struct UpdateUserFieldsDiffItem {
 /// Update user fields using diff-based conditional updates - compares old and new structs
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users \nSET updated_at = NOW() \n#[, name = #{name?}] \n#[, email = #{email?}] \n#[, age = #{age?}] \nWHERE id = #{user_id} \nRETURNING id, name, email, age, updated_at"))]
 pub async fn update_user_fields_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserFieldsDiffParams, new: &UpdateUserFieldsDiffParams, user_id: i32) -> Result<UpdateUserFieldsDiffItem, super::Error<UpdateUserFieldsDiffConstraints>> {
-    let mut final_sql = r"UPDATE public.users 
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users 
 SET updated_at = NOW() 
-#[, name = #{name?}] 
-#[, email = #{email?}] 
-#[, age = #{age?}] 
-WHERE id = $1 
-RETURNING id, name, email, age, updated_at".to_string();
-    let mut included_params = Vec::new();
-
+");
     if old.name != new.name {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(&new.name);
     }
-
+    qb.push(r" 
+");
     if old.email != new.email {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", r", email = #{email?}");
-        included_params.push("email");
-    } else {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", "");
+        qb.push(r", email = ");
+        qb.push_bind(&new.email);
     }
-
+    qb.push(r" 
+");
     if old.age != new.age {
-        final_sql = final_sql.replace(r"#[, age = #{age?}]", r", age = #{age?}");
-        included_params.push("age");
-    } else {
-        final_sql = final_sql.replace(r"#[, age = #{age?}]", "");
+        qb.push(r", age = ");
+        qb.push_bind(&new.age);
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"email") {
-        final_sql = final_sql.replace(r"#{email?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"age") {
-        final_sql = final_sql.replace(r"#{age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(&new.name);
-    }
-
-    if included_params.contains(&r"email") {
-        query = query.bind(&new.email);
-    }
-
-    if included_params.contains(&r"age") {
-        query = query.bind(&new.age);
-    }
+    qb.push(r" 
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r" 
+RETURNING id, name, email, age, updated_at");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -1494,56 +1360,28 @@ pub struct UpdateUserProfileDiffItem {
 /// Update user profile with conditional name/email - generates UpdateUserProfileDiffParams
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users \nSET profile = #{profile}, updated_at = NOW() \n#[, name = #{name?}] \n#[, email = #{email?}] \nWHERE id = #{user_id} \nRETURNING id, name, email, profile, updated_at"))]
 pub async fn update_user_profile_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserProfileDiffParams, new: &UpdateUserProfileDiffParams, profile: crate::models::UserProfile, user_id: i32) -> Result<UpdateUserProfileDiffItem, super::Error<UpdateUserProfileDiffConstraints>> {
-    let mut final_sql = r"UPDATE public.users 
-SET profile = $1, updated_at = NOW() 
-#[, name = #{name?}] 
-#[, email = #{email?}] 
-WHERE id = $2 
-RETURNING id, name, email, profile, updated_at".to_string();
-    let mut included_params = Vec::new();
-
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users 
+SET profile = ");
+    qb.push_bind(serde_json::to_value(&profile).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);
+    qb.push(r", updated_at = NOW() 
+");
     if old.name != new.name {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(&new.name);
     }
-
+    qb.push(r" 
+");
     if old.email != new.email {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", r", email = #{email?}");
-        included_params.push("email");
-    } else {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", "");
+        qb.push(r", email = ");
+        qb.push_bind(&new.email);
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{profile}", &format!("${}", param_counter));
-    param_counter += 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"email") {
-        final_sql = final_sql.replace(r"#{email?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    let profile_json = serde_json::to_value(&profile).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    query = query.bind(profile_json);
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(&new.name);
-    }
-
-    if included_params.contains(&r"email") {
-        query = query.bind(&new.email);
-    }
+    qb.push(r" 
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r" 
+RETURNING id, name, email, profile, updated_at");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -1608,56 +1446,28 @@ pub struct UpdateUserMetadataDiffItem {
 /// Update user metadata - reuses UpdateUserProfileDiffParams struct
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users \nSET profile = #{profile}, updated_at = NOW() \n#[, name = #{name?}] \n#[, email = #{email?}] \nWHERE id = #{user_id} \nRETURNING id, name, email, updated_at"))]
 pub async fn update_user_metadata_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserProfileDiffParams, new: &UpdateUserProfileDiffParams, profile: crate::models::UserProfile, user_id: i32) -> Result<UpdateUserMetadataDiffItem, super::Error<UpdateUserMetadataDiffConstraints>> {
-    let mut final_sql = r"UPDATE public.users 
-SET profile = $1, updated_at = NOW() 
-#[, name = #{name?}] 
-#[, email = #{email?}] 
-WHERE id = $2 
-RETURNING id, name, email, updated_at".to_string();
-    let mut included_params = Vec::new();
-
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users 
+SET profile = ");
+    qb.push_bind(serde_json::to_value(&profile).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);
+    qb.push(r", updated_at = NOW() 
+");
     if old.name != new.name {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(&new.name);
     }
-
+    qb.push(r" 
+");
     if old.email != new.email {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", r", email = #{email?}");
-        included_params.push("email");
-    } else {
-        final_sql = final_sql.replace(r"#[, email = #{email?}]", "");
+        qb.push(r", email = ");
+        qb.push_bind(&new.email);
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{profile}", &format!("${}", param_counter));
-    param_counter += 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"email") {
-        final_sql = final_sql.replace(r"#{email?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    let profile_json = serde_json::to_value(&profile).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    query = query.bind(profile_json);
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(&new.name);
-    }
-
-    if included_params.contains(&r"email") {
-        query = query.bind(&new.email);
-    }
+    qb.push(r" 
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r" 
+RETURNING id, name, email, updated_at");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -2179,46 +1989,23 @@ pub struct GetUsersCursorItem {
 ///               Filter: (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, updated_at\nFROM public.users\nWHERE 1 = 1\n#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]\nORDER BY updated_at ASC, id ASC\nLIMIT #{page_size}"))]
 pub async fn get_users_cursor(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, cursor_ua_asc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_id: Option<i32>, page_size: i64) -> Result<Vec<GetUsersCursorItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, updated_at
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, updated_at
 FROM public.users
 WHERE 1 = 1
-#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]
-ORDER BY updated_at ASC, id ASC
-LIMIT $1".to_string();
-    let mut included_params = Vec::new();
-
+");
     if cursor_ua_asc_ts.is_some() {
-        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", r"AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})");
-        included_params.push("cursor_ua_asc_ts");
-        included_params.push("cursor_ua_asc_id");
-    } else {
-        final_sql = final_sql.replace(r"#[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]", "");
+        qb.push(r"AND (updated_at, id) > (");
+        qb.push_bind(cursor_ua_asc_ts.as_ref().unwrap());
+        qb.push(r", ");
+        qb.push_bind(cursor_ua_asc_id.as_ref().unwrap());
+        qb.push(r")");
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{page_size}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"cursor_ua_asc_ts") {
-        final_sql = final_sql.replace(r"#{cursor_ua_asc_ts?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_ua_asc_id") {
-        final_sql = final_sql.replace(r"#{cursor_ua_asc_id?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&page_size);
-    if included_params.contains(&r"cursor_ua_asc_ts") {
-        query = query.bind(cursor_ua_asc_ts.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_ua_asc_id") {
-        query = query.bind(cursor_ua_asc_id.as_ref().unwrap());
-    }
+    qb.push(r"
+ORDER BY updated_at ASC, id ASC
+LIMIT ");
+    qb.push_bind(&page_size);
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -2300,50 +2087,42 @@ pub enum GetUsersMultiSortCursorSort {
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, updated_at\nFROM public.users\nWHERE 1 = 1\n#[AND (updated_at, id) > (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at ASC, id ASC LIMIT #{page_size?}]\n#[AND (updated_at, id) < (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at DESC, id DESC LIMIT #{page_size?}]\n#[ORDER BY name ASC, id ASC LIMIT #{page_size?}]\n#[ORDER BY name DESC, id DESC LIMIT #{page_size?}]"))]
 pub async fn get_users_multi_sort_cursor(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, sort: GetUsersMultiSortCursorSort) -> Result<Vec<GetUsersMultiSortCursorItem>, super::ErrorReadOnly> {
-    let sql: &str = match &sort {
-        GetUsersMultiSortCursorSort::UaAsc { .. } => r"SELECT id, name, email, updated_at
-        FROM public.users
-        WHERE 1 = 1
-        AND (updated_at, id) > ($1, $2) ORDER BY updated_at ASC, id ASC LIMIT $3",
-        GetUsersMultiSortCursorSort::UaDesc { .. } => r"SELECT id, name, email, updated_at
-        FROM public.users
-        WHERE 1 = 1
-        
-        AND (updated_at, id) < ($1, $2) ORDER BY updated_at DESC, id DESC LIMIT $3",
-        GetUsersMultiSortCursorSort::NameAsc { .. } => r"SELECT id, name, email, updated_at
-        FROM public.users
-        WHERE 1 = 1
-        
-        
-        ORDER BY name ASC, id ASC LIMIT $1",
-        GetUsersMultiSortCursorSort::NameDesc { .. } => r"SELECT id, name, email, updated_at
-        FROM public.users
-        WHERE 1 = 1
-        
-        
-        
-        ORDER BY name DESC, id DESC LIMIT $1",
-    };
-
-    let mut query = sqlx::query(sql);
-    match &sort {
-        GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id, page_size } => {
-            query = query.bind(cursor_ts);
-            query = query.bind(cursor_id);
-            query = query.bind(page_size);
-        }
-        GetUsersMultiSortCursorSort::UaDesc { cursor_ts, cursor_id, page_size } => {
-            query = query.bind(cursor_ts);
-            query = query.bind(cursor_id);
-            query = query.bind(page_size);
-        }
-        GetUsersMultiSortCursorSort::NameAsc { page_size } => {
-            query = query.bind(page_size);
-        }
-        GetUsersMultiSortCursorSort::NameDesc { page_size } => {
-            query = query.bind(page_size);
-        }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, updated_at
+FROM public.users
+WHERE 1 = 1
+");
+    if let GetUsersMultiSortCursorSort::UaAsc { cursor_ts, cursor_id, page_size, .. } = &sort {
+        qb.push(r"AND (updated_at, id) > (");
+        qb.push_bind(cursor_ts);
+        qb.push(r", ");
+        qb.push_bind(cursor_id);
+        qb.push(r") ORDER BY updated_at ASC, id ASC LIMIT ");
+        qb.push_bind(page_size);
     }
+    qb.push(r"
+");
+    if let GetUsersMultiSortCursorSort::UaDesc { cursor_ts, cursor_id, page_size, .. } = &sort {
+        qb.push(r"AND (updated_at, id) < (");
+        qb.push_bind(cursor_ts);
+        qb.push(r", ");
+        qb.push_bind(cursor_id);
+        qb.push(r") ORDER BY updated_at DESC, id DESC LIMIT ");
+        qb.push_bind(page_size);
+    }
+    qb.push(r"
+");
+    if let GetUsersMultiSortCursorSort::NameAsc { page_size, .. } = &sort {
+        qb.push(r"ORDER BY name ASC, id ASC LIMIT ");
+        qb.push_bind(page_size);
+    }
+    qb.push(r"
+");
+    if let GetUsersMultiSortCursorSort::NameDesc { page_size, .. } = &sort {
+        qb.push(r"ORDER BY name DESC, id DESC LIMIT ");
+        qb.push_bind(page_size);
+    }
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -2429,293 +2208,125 @@ pub enum SearchUsersFilteredSort {
 ///               Filter: ((NOT is_active) AND (id >= 0) AND ((name)::text ~~ 'dummy'::text) AND (created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone) AND (created_at <= '1970-01-01 00:00:00+00'::timestamp with time zone) AND ((name)::text = 'dummy'::text) AND ((email)::text = 'dummy'::text) AND (ROW(updated_at, id) > ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW(updated_at, id) < ROW('1970-01-01 00:00:00+00'::timestamp with time zone, 0)) AND (ROW((name)::text, id) > ROW('dummy'::text, 0)) AND (ROW((name)::text, id) < ROW('dummy'::text, 0)))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE id >= #{min_id}\n  #[AND name = #{name_exact?}]              \n  #[AND name LIKE #{name_starts_with?}]      \n  #[AND email = #{email_exact?}]\n  #[AND age >= #{age_from?}]                \n  #[AND age <= #{age_to?}]\n  #[AND is_active = #{is_active?}]\n  #[AND created_at >= #{created_from?}]\n  #[AND created_at <= #{created_to?}]\n  #[AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})]\n  #[AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})]\n  #[AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})]\n  #[AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})]\n#[LIMIT 100]\n#[ORDER BY updated_at ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY updated_at DESC, id DESC LIMIT #{limit?}]\n#[ORDER BY name ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY name DESC, id DESC LIMIT #{limit?}]"))]
 pub async fn search_users_filtered(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_id: i32, name_exact: Option<String>, name_starts_with: Option<String>, email_exact: Option<String>, age_from: Option<i32>, age_to: Option<i32>, is_active: Option<bool>, created_from: Option<chrono::DateTime<chrono::Utc>>, created_to: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_asc_id: Option<i32>, cursor_ua_desc_ts: Option<chrono::DateTime<chrono::Utc>>, cursor_ua_desc_id: Option<i32>, cursor_name_asc_val: Option<String>, cursor_name_asc_id: Option<i32>, cursor_name_desc_val: Option<String>, cursor_name_desc_id: Option<i32>, sort: SearchUsersFilteredSort) -> Result<Vec<SearchUsersFilteredItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age, is_active, created_at, updated_at
 FROM public.users
-WHERE id >= $1
-  __AM_BLK_0__              
-  __AM_BLK_1__      
-  __AM_BLK_2__
-  __AM_BLK_3__                
-  __AM_BLK_4__
-  __AM_BLK_5__
-  __AM_BLK_6__
-  __AM_BLK_7__
-  __AM_BLK_8__
-  __AM_BLK_9__
-  __AM_BLK_10__
-  __AM_BLK_11__
-__AM_BLK_12__
-__AM_BLK_13__
-__AM_BLK_14__
-__AM_BLK_15__
-__AM_BLK_16__".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
+WHERE id >= ");
+    qb.push_bind(&min_id);
+    qb.push(r"
+  ");
     if name_exact.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND name = #{name_exact?}");
-        included_params.push("name_exact");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+        qb.push(r"AND name = ");
+        qb.push_bind(name_exact.as_ref().unwrap());
     }
-
+    qb.push(r"              
+  ");
     if name_starts_with.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND name LIKE #{name_starts_with?}");
-        included_params.push("name_starts_with");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+        qb.push(r"AND name LIKE ");
+        qb.push_bind(name_starts_with.as_ref().unwrap());
     }
-
+    qb.push(r"      
+  ");
     if email_exact.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_2__", r"AND email = #{email_exact?}");
-        included_params.push("email_exact");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_2__", "");
+        qb.push(r"AND email = ");
+        qb.push_bind(email_exact.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if age_from.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_3__", r"AND age >= #{age_from?}");
-        included_params.push("age_from");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_3__", "");
+        qb.push(r"AND age >= ");
+        qb.push_bind(age_from.as_ref().unwrap());
     }
-
+    qb.push(r"                
+  ");
     if age_to.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_4__", r"AND age <= #{age_to?}");
-        included_params.push("age_to");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_4__", "");
+        qb.push(r"AND age <= ");
+        qb.push_bind(age_to.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if is_active.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_5__", r"AND is_active = #{is_active?}");
-        included_params.push("is_active");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_5__", "");
+        qb.push(r"AND is_active = ");
+        qb.push_bind(is_active.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if created_from.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_6__", r"AND created_at >= #{created_from?}");
-        included_params.push("created_from");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_6__", "");
+        qb.push(r"AND created_at >= ");
+        qb.push_bind(created_from.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if created_to.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_7__", r"AND created_at <= #{created_to?}");
-        included_params.push("created_to");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_7__", "");
+        qb.push(r"AND created_at <= ");
+        qb.push_bind(created_to.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if cursor_ua_asc_ts.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_8__", r"AND (updated_at, id) > (#{cursor_ua_asc_ts?}, #{cursor_ua_asc_id?})");
-        included_params.push("cursor_ua_asc_ts");
-        included_params.push("cursor_ua_asc_id");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_8__", "");
+        qb.push(r"AND (updated_at, id) > (");
+        qb.push_bind(cursor_ua_asc_ts.as_ref().unwrap());
+        qb.push(r", ");
+        qb.push_bind(cursor_ua_asc_id.as_ref().unwrap());
+        qb.push(r")");
     }
-
+    qb.push(r"
+  ");
     if cursor_ua_desc_ts.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_9__", r"AND (updated_at, id) < (#{cursor_ua_desc_ts?}, #{cursor_ua_desc_id?})");
-        included_params.push("cursor_ua_desc_ts");
-        included_params.push("cursor_ua_desc_id");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_9__", "");
+        qb.push(r"AND (updated_at, id) < (");
+        qb.push_bind(cursor_ua_desc_ts.as_ref().unwrap());
+        qb.push(r", ");
+        qb.push_bind(cursor_ua_desc_id.as_ref().unwrap());
+        qb.push(r")");
     }
-
+    qb.push(r"
+  ");
     if cursor_name_asc_val.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_10__", r"AND (name, id) > (#{cursor_name_asc_val?}, #{cursor_name_asc_id?})");
-        included_params.push("cursor_name_asc_val");
-        included_params.push("cursor_name_asc_id");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_10__", "");
+        qb.push(r"AND (name, id) > (");
+        qb.push_bind(cursor_name_asc_val.as_ref().unwrap());
+        qb.push(r", ");
+        qb.push_bind(cursor_name_asc_id.as_ref().unwrap());
+        qb.push(r")");
     }
-
+    qb.push(r"
+  ");
     if cursor_name_desc_val.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_11__", r"AND (name, id) < (#{cursor_name_desc_val?}, #{cursor_name_desc_id?})");
-        included_params.push("cursor_name_desc_val");
-        included_params.push("cursor_name_desc_id");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_11__", "");
+        qb.push(r"AND (name, id) < (");
+        qb.push_bind(cursor_name_desc_val.as_ref().unwrap());
+        qb.push(r", ");
+        qb.push_bind(cursor_name_desc_id.as_ref().unwrap());
+        qb.push(r")");
     }
-
-    let mut limit_cg: Option<&i64> = None;
-    match &sort {
-        SearchUsersFilteredSort::Unsorted => {
-            final_sql = final_sql.replace(r"__AM_BLK_12__", r"LIMIT 100");
-        }
-        SearchUsersFilteredSort::UaAsc { limit } => {
-            final_sql = final_sql.replace(r"__AM_BLK_13__", r"ORDER BY updated_at ASC, id ASC LIMIT #{limit?}");
-            limit_cg = Some(limit);
-            included_params.push("limit");
-        }
-        SearchUsersFilteredSort::UaDesc { limit } => {
-            final_sql = final_sql.replace(r"__AM_BLK_14__", r"ORDER BY updated_at DESC, id DESC LIMIT #{limit?}");
-            limit_cg = Some(limit);
-            included_params.push("limit");
-        }
-        SearchUsersFilteredSort::NameAsc { limit } => {
-            final_sql = final_sql.replace(r"__AM_BLK_15__", r"ORDER BY name ASC, id ASC LIMIT #{limit?}");
-            limit_cg = Some(limit);
-            included_params.push("limit");
-        }
-        SearchUsersFilteredSort::NameDesc { limit } => {
-            final_sql = final_sql.replace(r"__AM_BLK_16__", r"ORDER BY name DESC, id DESC LIMIT #{limit?}");
-            limit_cg = Some(limit);
-            included_params.push("limit");
-        }
+    qb.push(r"
+");
+    if let SearchUsersFilteredSort::Unsorted = &sort {
+        qb.push(r"LIMIT 100");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_12__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_13__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_14__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_15__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_16__", "");
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{min_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name_exact") {
-        final_sql = final_sql.replace(r"#{name_exact?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let SearchUsersFilteredSort::UaAsc { limit, .. } = &sort {
+        qb.push(r"ORDER BY updated_at ASC, id ASC LIMIT ");
+        qb.push_bind(limit);
     }
-    if included_params.contains(&r"name_starts_with") {
-        final_sql = final_sql.replace(r"#{name_starts_with?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let SearchUsersFilteredSort::UaDesc { limit, .. } = &sort {
+        qb.push(r"ORDER BY updated_at DESC, id DESC LIMIT ");
+        qb.push_bind(limit);
     }
-    if included_params.contains(&r"email_exact") {
-        final_sql = final_sql.replace(r"#{email_exact?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let SearchUsersFilteredSort::NameAsc { limit, .. } = &sort {
+        qb.push(r"ORDER BY name ASC, id ASC LIMIT ");
+        qb.push_bind(limit);
     }
-    if included_params.contains(&r"age_from") {
-        final_sql = final_sql.replace(r"#{age_from?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let SearchUsersFilteredSort::NameDesc { limit, .. } = &sort {
+        qb.push(r"ORDER BY name DESC, id DESC LIMIT ");
+        qb.push_bind(limit);
     }
-    if included_params.contains(&r"age_to") {
-        final_sql = final_sql.replace(r"#{age_to?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"is_active") {
-        final_sql = final_sql.replace(r"#{is_active?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"created_from") {
-        final_sql = final_sql.replace(r"#{created_from?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"created_to") {
-        final_sql = final_sql.replace(r"#{created_to?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_ua_asc_ts") {
-        final_sql = final_sql.replace(r"#{cursor_ua_asc_ts?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_ua_asc_id") {
-        final_sql = final_sql.replace(r"#{cursor_ua_asc_id?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_ua_desc_ts") {
-        final_sql = final_sql.replace(r"#{cursor_ua_desc_ts?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_ua_desc_id") {
-        final_sql = final_sql.replace(r"#{cursor_ua_desc_id?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_name_asc_val") {
-        final_sql = final_sql.replace(r"#{cursor_name_asc_val?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_name_asc_id") {
-        final_sql = final_sql.replace(r"#{cursor_name_asc_id?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_name_desc_val") {
-        final_sql = final_sql.replace(r"#{cursor_name_desc_val?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cursor_name_desc_id") {
-        final_sql = final_sql.replace(r"#{cursor_name_desc_id?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"limit") {
-        final_sql = final_sql.replace(r"#{limit?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&min_id);
-    if included_params.contains(&r"name_exact") {
-        query = query.bind(name_exact.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"name_starts_with") {
-        query = query.bind(name_starts_with.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"email_exact") {
-        query = query.bind(email_exact.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"age_from") {
-        query = query.bind(age_from.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"age_to") {
-        query = query.bind(age_to.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"is_active") {
-        query = query.bind(is_active.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"created_from") {
-        query = query.bind(created_from.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"created_to") {
-        query = query.bind(created_to.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_ua_asc_ts") {
-        query = query.bind(cursor_ua_asc_ts.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_ua_asc_id") {
-        query = query.bind(cursor_ua_asc_id.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_ua_desc_ts") {
-        query = query.bind(cursor_ua_desc_ts.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_ua_desc_id") {
-        query = query.bind(cursor_ua_desc_id.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_name_asc_val") {
-        query = query.bind(cursor_name_asc_val.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_name_asc_id") {
-        query = query.bind(cursor_name_asc_id.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_name_desc_val") {
-        query = query.bind(cursor_name_desc_val.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cursor_name_desc_id") {
-        query = query.bind(cursor_name_desc_id.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"limit") {
-        query = query.bind(limit_cg.unwrap());
-    }
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {

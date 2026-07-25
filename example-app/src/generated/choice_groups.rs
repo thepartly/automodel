@@ -40,29 +40,24 @@ pub enum SelectUsersSortedSort {
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email\nFROM public.users\nWHERE email LIKE #{email_prefix}\n#[ORDER BY id ASC LIMIT #{page?}]\n#[ORDER BY id DESC LIMIT #{page?}]"))]
 pub async fn select_users_sorted(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, sort: SelectUsersSortedSort) -> Result<Vec<SelectUsersSortedItem>, super::ErrorReadOnly> {
-    let sql: &str = match &sort {
-        SelectUsersSortedSort::Asc { .. } => r"SELECT id, name, email
-        FROM public.users
-        WHERE email LIKE $1
-        ORDER BY id ASC LIMIT $2",
-        SelectUsersSortedSort::Desc { .. } => r"SELECT id, name, email
-        FROM public.users
-        WHERE email LIKE $1
-        
-        ORDER BY id DESC LIMIT $2",
-    };
-
-    let mut query = sqlx::query(sql);
-    match &sort {
-        SelectUsersSortedSort::Asc { page } => {
-            query = query.bind(&email_prefix);
-            query = query.bind(page);
-        }
-        SelectUsersSortedSort::Desc { page } => {
-            query = query.bind(&email_prefix);
-            query = query.bind(page);
-        }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email
+FROM public.users
+WHERE email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+");
+    if let SelectUsersSortedSort::Asc { page, .. } = &sort {
+        qb.push(r"ORDER BY id ASC LIMIT ");
+        qb.push_bind(page);
     }
+    qb.push(r"
+");
+    if let SelectUsersSortedSort::Desc { page, .. } = &sort {
+        qb.push(r"ORDER BY id DESC LIMIT ");
+        qb.push_bind(page);
+    }
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -104,33 +99,22 @@ pub enum SelectUsersOptionalSortOrder {
 ///   Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email\nFROM public.users\nWHERE email LIKE #{email_prefix}\n#[ORDER BY name ASC]\n#[ORDER BY email ASC]"))]
 pub async fn select_users_optional_sort(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, order: Option<SelectUsersOptionalSortOrder>) -> Result<Vec<SelectUsersOptionalSortItem>, super::ErrorReadOnly> {
-    let sql: &str = match &order {
-        Some(SelectUsersOptionalSortOrder::ByName) => r"SELECT id, name, email
-        FROM public.users
-        WHERE email LIKE $1
-        ORDER BY name ASC",
-        Some(SelectUsersOptionalSortOrder::ByEmail) => r"SELECT id, name, email
-        FROM public.users
-        WHERE email LIKE $1
-        
-        ORDER BY email ASC",
-        None => r"SELECT id, name, email
-        FROM public.users
-        WHERE email LIKE $1",
-    };
-
-    let mut query = sqlx::query(sql);
-    match &order {
-        Some(SelectUsersOptionalSortOrder::ByName) => {
-            query = query.bind(&email_prefix);
-        }
-        Some(SelectUsersOptionalSortOrder::ByEmail) => {
-            query = query.bind(&email_prefix);
-        }
-        None => {
-            query = query.bind(&email_prefix);
-        }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email
+FROM public.users
+WHERE email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+");
+    if let Some(SelectUsersOptionalSortOrder::ByName) = &order {
+        qb.push(r"ORDER BY name ASC");
     }
+    qb.push(r"
+");
+    if let Some(SelectUsersOptionalSortOrder::ByEmail) = &order {
+        qb.push(r"ORDER BY email ASC");
+    }
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -190,83 +174,41 @@ pub enum SearchUsersMixedSort {
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE email LIKE #{email_prefix}\n  #[AND age >= #{min_age?}]\n  #[AND age <= #{max_age?}]\n#[LIMIT 100]\n#[ORDER BY age ASC, id ASC LIMIT #{limit?}]\n#[ORDER BY age DESC, id DESC LIMIT #{limit?}]"))]
 pub async fn search_users_mixed(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, min_age: Option<i32>, max_age: Option<i32>, sort: SearchUsersMixedSort) -> Result<Vec<SearchUsersMixedItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age
 FROM public.users
-WHERE email LIKE $1
-  __AM_BLK_0__
-  __AM_BLK_1__
-__AM_BLK_2__
-__AM_BLK_3__
-__AM_BLK_4__".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
+WHERE email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+  ");
     if min_age.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND age >= #{min_age?}");
-        included_params.push("min_age");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_0__", "");
+        qb.push(r"AND age >= ");
+        qb.push_bind(min_age.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if max_age.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND age <= #{max_age?}");
-        included_params.push("max_age");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+        qb.push(r"AND age <= ");
+        qb.push_bind(max_age.as_ref().unwrap());
     }
-
-    let mut limit_cg: Option<&i64> = None;
-    match &sort {
-        SearchUsersMixedSort::Unsorted => {
-            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LIMIT 100");
-        }
-        SearchUsersMixedSort::AgeAsc { limit } => {
-            final_sql = final_sql.replace(r"__AM_BLK_3__", r"ORDER BY age ASC, id ASC LIMIT #{limit?}");
-            limit_cg = Some(limit);
-            included_params.push("limit");
-        }
-        SearchUsersMixedSort::AgeDesc { limit } => {
-            final_sql = final_sql.replace(r"__AM_BLK_4__", r"ORDER BY age DESC, id DESC LIMIT #{limit?}");
-            limit_cg = Some(limit);
-            included_params.push("limit");
-        }
+    qb.push(r"
+");
+    if let SearchUsersMixedSort::Unsorted = &sort {
+        qb.push(r"LIMIT 100");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_4__", "");
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"min_age") {
-        final_sql = final_sql.replace(r"#{min_age?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let SearchUsersMixedSort::AgeAsc { limit, .. } = &sort {
+        qb.push(r"ORDER BY age ASC, id ASC LIMIT ");
+        qb.push_bind(limit);
     }
-    if included_params.contains(&r"max_age") {
-        final_sql = final_sql.replace(r"#{max_age?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let SearchUsersMixedSort::AgeDesc { limit, .. } = &sort {
+        qb.push(r"ORDER BY age DESC, id DESC LIMIT ");
+        qb.push_bind(limit);
     }
-    if included_params.contains(&r"limit") {
-        final_sql = final_sql.replace(r"#{limit?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&email_prefix);
-    if included_params.contains(&r"min_age") {
-        query = query.bind(min_age.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"max_age") {
-        query = query.bind(max_age.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"limit") {
-        query = query.bind(limit_cg.unwrap());
-    }
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -336,81 +278,36 @@ pub enum MultiGroupSearchSort {
 ///               Filter: (((email)::text ~~ 'dummy'::text) AND (age >= 0))
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE email LIKE #{email_prefix}\n  #[AND age >= #{min_age?}]\n  #[AND age <= #{max_age?}]\n#[ORDER BY id ASC LIMIT #{lim?}]\n#[ORDER BY id DESC LIMIT #{lim?}]"))]
 pub async fn multi_group_search(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, range: Option<MultiGroupSearchRange>, sort: MultiGroupSearchSort) -> Result<Vec<MultiGroupSearchItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age
 FROM public.users
-WHERE email LIKE $1
-  __AM_BLK_0__
-  __AM_BLK_1__
-__AM_BLK_2__
-__AM_BLK_3__".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    let mut min_age_cg: Option<&i32> = None;
-    let mut max_age_cg: Option<&i32> = None;
-    let mut lim_cg: Option<&i64> = None;
-    match &range {
-        Some(MultiGroupSearchRange::Min { min_age }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND age >= #{min_age?}");
-            min_age_cg = Some(min_age);
-            included_params.push("min_age");
-        }
-        Some(MultiGroupSearchRange::Max { max_age }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND age <= #{max_age?}");
-            max_age_cg = Some(max_age);
-            included_params.push("max_age");
-        }
-        None => {}
+WHERE email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+  ");
+    if let Some(MultiGroupSearchRange::Min { min_age, .. }) = &range {
+        qb.push(r"AND age >= ");
+        qb.push_bind(min_age);
     }
-    match &sort {
-        MultiGroupSearchSort::Asc { lim } => {
-            final_sql = final_sql.replace(r"__AM_BLK_2__", r"ORDER BY id ASC LIMIT #{lim?}");
-            lim_cg = Some(lim);
-            included_params.push("lim");
-        }
-        MultiGroupSearchSort::Desc { lim } => {
-            final_sql = final_sql.replace(r"__AM_BLK_3__", r"ORDER BY id DESC LIMIT #{lim?}");
-            lim_cg = Some(lim);
-            included_params.push("lim");
-        }
+    qb.push(r"
+  ");
+    if let Some(MultiGroupSearchRange::Max { max_age, .. }) = &range {
+        qb.push(r"AND age <= ");
+        qb.push_bind(max_age);
     }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"min_age") {
-        final_sql = final_sql.replace(r"#{min_age?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let MultiGroupSearchSort::Asc { lim, .. } = &sort {
+        qb.push(r"ORDER BY id ASC LIMIT ");
+        qb.push_bind(lim);
     }
-    if included_params.contains(&r"max_age") {
-        final_sql = final_sql.replace(r"#{max_age?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+");
+    if let MultiGroupSearchSort::Desc { lim, .. } = &sort {
+        qb.push(r"ORDER BY id DESC LIMIT ");
+        qb.push_bind(lim);
     }
-    if included_params.contains(&r"lim") {
-        final_sql = final_sql.replace(r"#{lim?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&email_prefix);
-    if included_params.contains(&r"min_age") {
-        query = query.bind(min_age_cg.unwrap());
-    }
-
-    if included_params.contains(&r"max_age") {
-        query = query.bind(max_age_cg.unwrap());
-    }
-
-    if included_params.contains(&r"lim") {
-        query = query.bind(lim_cg.unwrap());
-    }
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -471,92 +368,40 @@ pub enum CursorOptionalFirstPageSort {
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC]\n  #[#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
 pub async fn cursor_optional_first_page(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, sort: Option<CursorOptionalFirstPageSort>) -> Result<Vec<CursorOptionalFirstPageItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age, is_active, created_at, updated_at
 FROM public.users
-WHERE name LIKE $1
-  __AM_BLK_0__
-  __AM_BLK_1__
-LIMIT $2;".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    let mut cur_name_asc_val_cg: Option<&String> = None;
-    let mut cur_name_asc_id_cg: Option<&i32> = None;
-    let mut cur_name_desc_val_cg: Option<&String> = None;
-    let mut cur_name_desc_id_cg: Option<&i32> = None;
-    match &sort {
-        Some(CursorOptionalFirstPageSort::NameAsc { cur_name_asc_val, cur_name_asc_id }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})] ORDER BY name ASC,  id ASC");
-            if cur_name_asc_val.is_some() {
-                final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})]", r"AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})");
-                cur_name_asc_val_cg = cur_name_asc_val.as_ref();
-                included_params.push("cur_name_asc_val");
-                cur_name_asc_id_cg = cur_name_asc_id.as_ref();
-                included_params.push("cur_name_asc_id");
-            } else {
-                final_sql = final_sql.replace(r"#[AND (name, id) > (#{cur_name_asc_val?}, #{cur_name_asc_id?})]", "");
-            }
+WHERE name LIKE ");
+    qb.push_bind(&name_prefix);
+    qb.push(r"
+  ");
+    if let Some(CursorOptionalFirstPageSort::NameAsc { cur_name_asc_val, cur_name_asc_id, .. }) = &sort {
+        if cur_name_asc_val.is_some() {
+            qb.push(r"AND (name, id) > (");
+            qb.push_bind(cur_name_asc_val.as_ref().unwrap());
+            qb.push(r", ");
+            qb.push_bind(cur_name_asc_id.as_ref().unwrap());
+            qb.push(r")");
         }
-        Some(CursorOptionalFirstPageSort::NameDesc { cur_name_desc_val, cur_name_desc_id }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})] ORDER BY name DESC, id DESC");
-            if cur_name_desc_val.is_some() {
-                final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})]", r"AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})");
-                cur_name_desc_val_cg = cur_name_desc_val.as_ref();
-                included_params.push("cur_name_desc_val");
-                cur_name_desc_id_cg = cur_name_desc_id.as_ref();
-                included_params.push("cur_name_desc_id");
-            } else {
-                final_sql = final_sql.replace(r"#[AND (name, id) < (#{cur_name_desc_val?}, #{cur_name_desc_id?})]", "");
-            }
+        qb.push(r" ORDER BY name ASC,  id ASC");
+    }
+    qb.push(r"
+  ");
+    if let Some(CursorOptionalFirstPageSort::NameDesc { cur_name_desc_val, cur_name_desc_id, .. }) = &sort {
+        if cur_name_desc_val.is_some() {
+            qb.push(r"AND (name, id) < (");
+            qb.push_bind(cur_name_desc_val.as_ref().unwrap());
+            qb.push(r", ");
+            qb.push_bind(cur_name_desc_id.as_ref().unwrap());
+            qb.push(r")");
         }
-        None => {}
+        qb.push(r" ORDER BY name DESC, id DESC");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{name_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"cur_name_asc_val") {
-        final_sql = final_sql.replace(r"#{cur_name_asc_val?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_name_asc_id") {
-        final_sql = final_sql.replace(r"#{cur_name_asc_id?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_name_desc_val") {
-        final_sql = final_sql.replace(r"#{cur_name_desc_val?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_name_desc_id") {
-        final_sql = final_sql.replace(r"#{cur_name_desc_id?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&name_prefix);
-    query = query.bind(&lim);
-    if included_params.contains(&r"cur_name_asc_val") {
-        query = query.bind(cur_name_asc_val_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_name_asc_id") {
-        query = query.bind(cur_name_asc_id_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_name_desc_val") {
-        query = query.bind(cur_name_desc_val_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_name_desc_id") {
-        query = query.bind(cur_name_desc_id_cg.unwrap());
-    }
+    qb.push(r"
+LIMIT ");
+    qb.push_bind(&lim);
+    qb.push(r";");
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -615,101 +460,44 @@ pub enum DualNestedAgeBoundsSort {
 ///               Filter: ((name)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]\n  #[#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]\nLIMIT #{lim};"))]
 pub async fn dual_nested_age_bounds(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, sort: DualNestedAgeBoundsSort) -> Result<Vec<DualNestedAgeBoundsItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age
 FROM public.users
-WHERE name LIKE $1
-  __AM_BLK_0__
-  __AM_BLK_1__
-LIMIT $2;".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    let mut asc_min_age_cg: Option<&i32> = None;
-    let mut asc_max_age_cg: Option<&i32> = None;
-    let mut desc_min_age_cg: Option<&i32> = None;
-    let mut desc_max_age_cg: Option<&i32> = None;
-    match &sort {
-        DualNestedAgeBoundsSort::Asc { asc_min_age, asc_max_age } => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"#[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC");
-            if asc_min_age.is_some() {
-                final_sql = final_sql.replace(r"#[AND age >= #{asc_min_age?}]", r"AND age >= #{asc_min_age?}");
-                asc_min_age_cg = asc_min_age.as_ref();
-                included_params.push("asc_min_age");
-            } else {
-                final_sql = final_sql.replace(r"#[AND age >= #{asc_min_age?}]", "");
-            }
-            if asc_max_age.is_some() {
-                final_sql = final_sql.replace(r"#[AND age <= #{asc_max_age?}]", r"AND age <= #{asc_max_age?}");
-                asc_max_age_cg = asc_max_age.as_ref();
-                included_params.push("asc_max_age");
-            } else {
-                final_sql = final_sql.replace(r"#[AND age <= #{asc_max_age?}]", "");
-            }
+WHERE name LIKE ");
+    qb.push_bind(&name_prefix);
+    qb.push(r"
+  ");
+    if let DualNestedAgeBoundsSort::Asc { asc_min_age, asc_max_age, .. } = &sort {
+        if asc_min_age.is_some() {
+            qb.push(r"AND age >= ");
+            qb.push_bind(asc_min_age.as_ref().unwrap());
         }
-        DualNestedAgeBoundsSort::Desc { desc_min_age, desc_max_age } => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"#[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC");
-            if desc_min_age.is_some() {
-                final_sql = final_sql.replace(r"#[AND age >= #{desc_min_age?}]", r"AND age >= #{desc_min_age?}");
-                desc_min_age_cg = desc_min_age.as_ref();
-                included_params.push("desc_min_age");
-            } else {
-                final_sql = final_sql.replace(r"#[AND age >= #{desc_min_age?}]", "");
-            }
-            if desc_max_age.is_some() {
-                final_sql = final_sql.replace(r"#[AND age <= #{desc_max_age?}]", r"AND age <= #{desc_max_age?}");
-                desc_max_age_cg = desc_max_age.as_ref();
-                included_params.push("desc_max_age");
-            } else {
-                final_sql = final_sql.replace(r"#[AND age <= #{desc_max_age?}]", "");
-            }
+        qb.push(r"  ");
+        if asc_max_age.is_some() {
+            qb.push(r"AND age <= ");
+            qb.push_bind(asc_max_age.as_ref().unwrap());
         }
+        qb.push(r"  ORDER BY age ASC,  id ASC");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{name_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"asc_min_age") {
-        final_sql = final_sql.replace(r"#{asc_min_age?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+  ");
+    if let DualNestedAgeBoundsSort::Desc { desc_min_age, desc_max_age, .. } = &sort {
+        if desc_min_age.is_some() {
+            qb.push(r"AND age >= ");
+            qb.push_bind(desc_min_age.as_ref().unwrap());
+        }
+        qb.push(r" ");
+        if desc_max_age.is_some() {
+            qb.push(r"AND age <= ");
+            qb.push_bind(desc_max_age.as_ref().unwrap());
+        }
+        qb.push(r" ORDER BY age DESC, id DESC");
     }
-    if included_params.contains(&r"asc_max_age") {
-        final_sql = final_sql.replace(r"#{asc_max_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"desc_min_age") {
-        final_sql = final_sql.replace(r"#{desc_min_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"desc_max_age") {
-        final_sql = final_sql.replace(r"#{desc_max_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&name_prefix);
-    query = query.bind(&lim);
-    if included_params.contains(&r"asc_min_age") {
-        query = query.bind(asc_min_age_cg.unwrap());
-    }
-
-    if included_params.contains(&r"asc_max_age") {
-        query = query.bind(asc_max_age_cg.unwrap());
-    }
-
-    if included_params.contains(&r"desc_min_age") {
-        query = query.bind(desc_min_age_cg.unwrap());
-    }
-
-    if included_params.contains(&r"desc_max_age") {
-        query = query.bind(desc_max_age_cg.unwrap());
-    }
+    qb.push(r"
+LIMIT ");
+    qb.push_bind(&lim);
+    qb.push(r";");
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -766,92 +554,39 @@ pub enum DirectAndNestedMixedFilter {
 ///               Filter: ((name)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active\nFROM public.users\nWHERE name LIKE #{name_prefix}\n  #[AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]\n  #[AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]\nORDER BY id ASC\nLIMIT #{lim};"))]
 pub async fn direct_and_nested_mixed(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name_prefix: String, lim: i64, filter: DirectAndNestedMixedFilter) -> Result<Vec<DirectAndNestedMixedItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age, is_active
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age, is_active
 FROM public.users
-WHERE name LIKE $1
-  __AM_BLK_0__
-  __AM_BLK_1__
+WHERE name LIKE ");
+    qb.push_bind(&name_prefix);
+    qb.push(r"
+  ");
+    if let DirectAndNestedMixedFilter::ByActive { want_active, active_min_age, .. } = &filter {
+        qb.push(r"AND is_active = ");
+        qb.push_bind(want_active);
+        qb.push(r" ");
+        if active_min_age.is_some() {
+            qb.push(r"AND age >= ");
+            qb.push_bind(active_min_age.as_ref().unwrap());
+        }
+    }
+    qb.push(r"
+  ");
+    if let DirectAndNestedMixedFilter::ByAge { floor_age, ceil_age, .. } = &filter {
+        qb.push(r"AND age >= ");
+        qb.push_bind(floor_age);
+        qb.push(r"        ");
+        if ceil_age.is_some() {
+            qb.push(r"AND age <= ");
+            qb.push_bind(ceil_age.as_ref().unwrap());
+        }
+    }
+    qb.push(r"
 ORDER BY id ASC
-LIMIT $2;".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    let mut want_active_cg: Option<&bool> = None;
-    let mut active_min_age_cg: Option<&i32> = None;
-    let mut floor_age_cg: Option<&i32> = None;
-    let mut ceil_age_cg: Option<&i32> = None;
-    match &filter {
-        DirectAndNestedMixedFilter::ByActive { want_active, active_min_age } => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND is_active = #{want_active} #[AND age >= #{active_min_age?}]");
-            want_active_cg = Some(want_active);
-            included_params.push("want_active");
-            if active_min_age.is_some() {
-                final_sql = final_sql.replace(r"#[AND age >= #{active_min_age?}]", r"AND age >= #{active_min_age?}");
-                active_min_age_cg = active_min_age.as_ref();
-                included_params.push("active_min_age");
-            } else {
-                final_sql = final_sql.replace(r"#[AND age >= #{active_min_age?}]", "");
-            }
-        }
-        DirectAndNestedMixedFilter::ByAge { floor_age, ceil_age } => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]");
-            floor_age_cg = Some(floor_age);
-            included_params.push("floor_age");
-            if ceil_age.is_some() {
-                final_sql = final_sql.replace(r"#[AND age <= #{ceil_age?}]", r"AND age <= #{ceil_age?}");
-                ceil_age_cg = ceil_age.as_ref();
-                included_params.push("ceil_age");
-            } else {
-                final_sql = final_sql.replace(r"#[AND age <= #{ceil_age?}]", "");
-            }
-        }
-    }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{name_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"want_active") {
-        final_sql = final_sql.replace(r"#{want_active}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"active_min_age") {
-        final_sql = final_sql.replace(r"#{active_min_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"floor_age") {
-        final_sql = final_sql.replace(r"#{floor_age}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"ceil_age") {
-        final_sql = final_sql.replace(r"#{ceil_age?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&name_prefix);
-    query = query.bind(&lim);
-    if included_params.contains(&r"want_active") {
-        query = query.bind(want_active_cg.unwrap());
-    }
-
-    if included_params.contains(&r"active_min_age") {
-        query = query.bind(active_min_age_cg.unwrap());
-    }
-
-    if included_params.contains(&r"floor_age") {
-        query = query.bind(floor_age_cg.unwrap());
-    }
-
-    if included_params.contains(&r"ceil_age") {
-        query = query.bind(ceil_age_cg.unwrap());
-    }
+LIMIT ");
+    qb.push_bind(&lim);
+    qb.push(r";");
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -900,39 +635,30 @@ pub enum UserOptionalReferrerReferrer {
 ///         Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r.age]#[NULL] AS referrer_age\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
 pub async fn user_optional_referrer(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerReferrer) -> Result<Vec<UserOptionalReferrerItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT
   u.id,
   u.name,
-  __AM_BLK_0____AM_BLK_1__ AS referrer_age
-FROM public.users u
-__AM_BLK_2__
-WHERE u.email LIKE $1
-ORDER BY u.id".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    match &referrer {
-        UserOptionalReferrerReferrer::On => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"r.age");
-            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LEFT JOIN public.users r ON r.id = u.referrer_id");
-        }
-        UserOptionalReferrerReferrer::Off => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
-        }
+  ");
+    if let UserOptionalReferrerReferrer::On = &referrer {
+        qb.push(r"r.age");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+    if let UserOptionalReferrerReferrer::Off = &referrer {
+        qb.push(r"NULL");
+    }
+    qb.push(r" AS referrer_age
+FROM public.users u
+");
+    if let UserOptionalReferrerReferrer::On = &referrer {
+        qb.push(r"LEFT JOIN public.users r ON r.id = u.referrer_id");
+    }
+    qb.push(r"
+WHERE u.email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+ORDER BY u.id");
+    let query = qb.build();
 
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&email_prefix);
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
         Ok(UserOptionalReferrerItem {
@@ -975,32 +701,24 @@ pub enum UserOptionalOwnFieldAge {
 ///         Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[u.age]#[NULL] AS maybe_age\nFROM public.users u\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
 pub async fn user_optional_own_field(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, age: UserOptionalOwnFieldAge) -> Result<Vec<UserOptionalOwnFieldItem>, super::ErrorReadOnly> {
-    let sql: &str = match &age {
-        UserOptionalOwnFieldAge::On => r"SELECT
-         u.id,
-         u.name,
-         u.age AS maybe_age
-        FROM public.users u
-        WHERE u.email LIKE $1
-        ORDER BY u.id",
-        UserOptionalOwnFieldAge::Off => r"SELECT
-         u.id,
-         u.name,
-         NULL AS maybe_age
-        FROM public.users u
-        WHERE u.email LIKE $1
-        ORDER BY u.id",
-    };
-
-    let mut query = sqlx::query(sql);
-    match &age {
-        UserOptionalOwnFieldAge::On => {
-            query = query.bind(&email_prefix);
-        }
-        UserOptionalOwnFieldAge::Off => {
-            query = query.bind(&email_prefix);
-        }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT
+  u.id,
+  u.name,
+  ");
+    if let UserOptionalOwnFieldAge::On = &age {
+        qb.push(r"u.age");
     }
+    if let UserOptionalOwnFieldAge::Off = &age {
+        qb.push(r"NULL");
+    }
+    qb.push(r" AS maybe_age
+FROM public.users u
+WHERE u.email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+ORDER BY u.id");
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
@@ -1047,39 +765,30 @@ pub enum UserOptionalReferrerFullReferrer {
 ///         Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r]#[NULL] AS referrer\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
 pub async fn user_optional_referrer_full(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerFullReferrer) -> Result<Vec<UserOptionalReferrerFullItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT
   u.id,
   u.name,
-  __AM_BLK_0____AM_BLK_1__ AS referrer
-FROM public.users u
-__AM_BLK_2__
-WHERE u.email LIKE $1
-ORDER BY u.id".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    match &referrer {
-        UserOptionalReferrerFullReferrer::On => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"r");
-            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LEFT JOIN public.users r ON r.id = u.referrer_id");
-        }
-        UserOptionalReferrerFullReferrer::Off => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
-        }
+  ");
+    if let UserOptionalReferrerFullReferrer::On = &referrer {
+        qb.push(r"r");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+    if let UserOptionalReferrerFullReferrer::Off = &referrer {
+        qb.push(r"NULL");
+    }
+    qb.push(r" AS referrer
+FROM public.users u
+");
+    if let UserOptionalReferrerFullReferrer::On = &referrer {
+        qb.push(r"LEFT JOIN public.users r ON r.id = u.referrer_id");
+    }
+    qb.push(r"
+WHERE u.email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+ORDER BY u.id");
+    let query = qb.build();
 
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&email_prefix);
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
         Ok(UserOptionalReferrerFullItem {
@@ -1135,42 +844,35 @@ pub enum UserOptionalPostsPosts {
 ///         Filter: ((email)::text ~~ 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)]#[NULL] AS posts\nFROM public.users u\n#[LEFT JOIN public.posts p ON p.author_id = u.id]\nWHERE u.email LIKE #{email_prefix}\n#[GROUP BY u.id, u.name]\nORDER BY u.id"))]
 pub async fn user_optional_posts(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, posts: UserOptionalPostsPosts) -> Result<Vec<UserOptionalPostsItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT
   u.id,
   u.name,
-  __AM_BLK_0____AM_BLK_1__ AS posts
-FROM public.users u
-__AM_BLK_2__
-WHERE u.email LIKE $1
-__AM_BLK_3__
-ORDER BY u.id".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    match &posts {
-        UserOptionalPostsPosts::On => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)");
-            final_sql = final_sql.replace(r"__AM_BLK_2__", r"LEFT JOIN public.posts p ON p.author_id = u.id");
-            final_sql = final_sql.replace(r"__AM_BLK_3__", r"GROUP BY u.id, u.name");
-        }
-        UserOptionalPostsPosts::Off => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
-        }
+  ");
+    if let UserOptionalPostsPosts::On = &posts {
+        qb.push(r"array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
+    if let UserOptionalPostsPosts::Off = &posts {
+        qb.push(r"NULL");
+    }
+    qb.push(r" AS posts
+FROM public.users u
+");
+    if let UserOptionalPostsPosts::On = &posts {
+        qb.push(r"LEFT JOIN public.posts p ON p.author_id = u.id");
+    }
+    qb.push(r"
+WHERE u.email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+");
+    if let UserOptionalPostsPosts::On = &posts {
+        qb.push(r"GROUP BY u.id, u.name");
+    }
+    qb.push(r"
+ORDER BY u.id");
+    let query = qb.build();
 
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&email_prefix);
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
         Ok(UserOptionalPostsItem {
@@ -1241,50 +943,38 @@ pub enum UserOptionalReferrerAndPostsPosts {
 ///               Index Cond: (id = u.referrer_id)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n  u.id,\n  u.name,\n  #[r]#[NULL] AS referrer,\n  #[(SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[NULL] AS posts\nFROM public.users u\n#[LEFT JOIN public.users r ON r.id = u.referrer_id]\nWHERE u.email LIKE #{email_prefix}\nORDER BY u.id"))]
 pub async fn user_optional_referrer_and_posts(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, email_prefix: String, referrer: UserOptionalReferrerAndPostsReferrer, posts: UserOptionalReferrerAndPostsPosts) -> Result<Vec<UserOptionalReferrerAndPostsItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT
   u.id,
   u.name,
-  __AM_BLK_0____AM_BLK_1__ AS referrer,
-  __AM_BLK_2____AM_BLK_3__ AS posts
+  ");
+    if let UserOptionalReferrerAndPostsReferrer::On = &referrer {
+        qb.push(r"r");
+    }
+    if let UserOptionalReferrerAndPostsReferrer::Off = &referrer {
+        qb.push(r"NULL");
+    }
+    qb.push(r" AS referrer,
+  ");
+    if let UserOptionalReferrerAndPostsPosts::On = &posts {
+        qb.push(r"(SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)");
+    }
+    if let UserOptionalReferrerAndPostsPosts::Off = &posts {
+        qb.push(r"NULL");
+    }
+    qb.push(r" AS posts
 FROM public.users u
-__AM_BLK_4__
-WHERE u.email LIKE $1
-ORDER BY u.id".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
-    match &referrer {
-        UserOptionalReferrerAndPostsReferrer::On => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"r");
-            final_sql = final_sql.replace(r"__AM_BLK_4__", r"LEFT JOIN public.users r ON r.id = u.referrer_id");
-        }
-        UserOptionalReferrerAndPostsReferrer::Off => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"NULL");
-        }
+");
+    if let UserOptionalReferrerAndPostsReferrer::On = &referrer {
+        qb.push(r"LEFT JOIN public.users r ON r.id = u.referrer_id");
     }
-    match &posts {
-        UserOptionalReferrerAndPostsPosts::On => {
-            final_sql = final_sql.replace(r"__AM_BLK_2__", r"(SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)");
-        }
-        UserOptionalReferrerAndPostsPosts::Off => {
-            final_sql = final_sql.replace(r"__AM_BLK_3__", r"NULL");
-        }
-    }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_4__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_2__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_3__", "");
+    qb.push(r"
+WHERE u.email LIKE ");
+    qb.push_bind(&email_prefix);
+    qb.push(r"
+ORDER BY u.id");
+    let query = qb.build();
 
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{email_prefix}", &format!("${}", param_counter));
-    param_counter += 1;
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&email_prefix);
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
         Ok(UserOptionalReferrerAndPostsItem {
@@ -1416,260 +1106,108 @@ pub enum ReproCombinedCursorSortSort {
 ///                     Filter: (unnest = 'dummy'::text)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT id, name, email, age, is_active, created_at, updated_at\nFROM public.users\nWHERE id >= #{min_id}\n  #[AND is_active IS TRUE]\n  #[AND is_active IS FALSE]\n  #[AND (name, email) IN (\n      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])\n  )]\n  #[AND name = #{name_exact?}]\n  #[AND name LIKE #{name_starts_with?}]\n  #[AND updated_at >= #{updated_from?}]\n  #[AND updated_at <= #{updated_to?}]\n  #[AND EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(profile->'social_links') AS sl\n      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])\n  )]\n  #[AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC]\n  #[AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC]\n  #[AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC]\n  #[AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC]\nLIMIT #{lim};"))]
 pub async fn repro_combined_cursor_sort(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_id: i32, req_names: Option<Vec<String>>, req_emails: Option<Vec<String>>, name_exact: Option<String>, name_starts_with: Option<String>, updated_from: Option<chrono::DateTime<chrono::Utc>>, updated_to: Option<chrono::DateTime<chrono::Utc>>, platforms: Option<Vec<String>>, lim: i64, archived: Option<ReproCombinedCursorSortArchived>, sort: Option<ReproCombinedCursorSortSort>) -> Result<Vec<ReproCombinedCursorSortItem>, super::ErrorReadOnly> {
-    let mut final_sql = r"SELECT id, name, email, age, is_active, created_at, updated_at
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT id, name, email, age, is_active, created_at, updated_at
 FROM public.users
-WHERE id >= $1
-  __AM_BLK_0__
-  __AM_BLK_1__
-  __AM_BLK_2__
-  __AM_BLK_3__
-  __AM_BLK_4__
-  __AM_BLK_5__
-  __AM_BLK_6__
-  __AM_BLK_7__
-  __AM_BLK_8__
-  __AM_BLK_9__
-  __AM_BLK_10__
-  __AM_BLK_11__
-LIMIT $2;".to_string();
-    #[allow(unused_mut, unused_variables)]
-    let mut included_params: Vec<&str> = Vec::new();
-
+WHERE id >= ");
+    qb.push_bind(&min_id);
+    qb.push(r"
+  ");
+    if let Some(ReproCombinedCursorSortArchived::Active) = &archived {
+        qb.push(r"AND is_active IS TRUE");
+    }
+    qb.push(r"
+  ");
+    if let Some(ReproCombinedCursorSortArchived::Inactive) = &archived {
+        qb.push(r"AND is_active IS FALSE");
+    }
+    qb.push(r"
+  ");
     if req_names.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_2__", r"AND (name, email) IN (
-      SELECT * FROM UNNEST(#{req_names?}::text[], #{req_emails?}::text[])
+        qb.push(r"AND (name, email) IN (
+      SELECT * FROM UNNEST(");
+        qb.push_bind(req_names.as_ref().unwrap());
+        qb.push(r"::text[], ");
+        qb.push_bind(req_emails.as_ref().unwrap());
+        qb.push(r"::text[])
   )");
-        included_params.push("req_names");
-        included_params.push("req_emails");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_2__", "");
     }
-
+    qb.push(r"
+  ");
     if name_exact.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_3__", r"AND name = #{name_exact?}");
-        included_params.push("name_exact");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_3__", "");
+        qb.push(r"AND name = ");
+        qb.push_bind(name_exact.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if name_starts_with.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_4__", r"AND name LIKE #{name_starts_with?}");
-        included_params.push("name_starts_with");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_4__", "");
+        qb.push(r"AND name LIKE ");
+        qb.push_bind(name_starts_with.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if updated_from.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_5__", r"AND updated_at >= #{updated_from?}");
-        included_params.push("updated_from");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_5__", "");
+        qb.push(r"AND updated_at >= ");
+        qb.push_bind(updated_from.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if updated_to.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_6__", r"AND updated_at <= #{updated_to?}");
-        included_params.push("updated_to");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_6__", "");
+        qb.push(r"AND updated_at <= ");
+        qb.push_bind(updated_to.as_ref().unwrap());
     }
-
+    qb.push(r"
+  ");
     if platforms.is_some() {
-        final_sql = final_sql.replace(r"__AM_BLK_7__", r"AND EXISTS (
+        qb.push(r"AND EXISTS (
       SELECT 1
       FROM jsonb_array_elements(profile->'social_links') AS sl
-      WHERE (sl->>'platform') = ANY(#{platforms?}::text[])
+      WHERE (sl->>'platform') = ANY(");
+        qb.push_bind(platforms.as_ref().unwrap());
+        qb.push(r"::text[])
   )");
-        included_params.push("platforms");
-    } else {
-        final_sql = final_sql.replace(r"__AM_BLK_7__", "");
     }
-
-    let mut cur_ua_asc_ts_cg: Option<&chrono::DateTime<chrono::Utc>> = None;
-    let mut cur_ua_asc_id_cg: Option<&i32> = None;
-    let mut cur_ua_desc_ts_cg: Option<&chrono::DateTime<chrono::Utc>> = None;
-    let mut cur_ua_desc_id_cg: Option<&i32> = None;
-    let mut cur_name_asc_val_cg: Option<&String> = None;
-    let mut cur_name_asc_id_cg: Option<&i32> = None;
-    let mut cur_name_desc_val_cg: Option<&String> = None;
-    let mut cur_name_desc_id_cg: Option<&i32> = None;
-    match &archived {
-        Some(ReproCombinedCursorSortArchived::Active) => {
-            final_sql = final_sql.replace(r"__AM_BLK_0__", r"AND is_active IS TRUE");
-        }
-        Some(ReproCombinedCursorSortArchived::Inactive) => {
-            final_sql = final_sql.replace(r"__AM_BLK_1__", r"AND is_active IS FALSE");
-        }
-        None => {}
+    qb.push(r"
+  ");
+    if let Some(ReproCombinedCursorSortSort::UaAsc { cur_ua_asc_ts, cur_ua_asc_id, .. }) = &sort {
+        qb.push(r"AND (updated_at, id) > (");
+        qb.push_bind(cur_ua_asc_ts);
+        qb.push(r", ");
+        qb.push_bind(cur_ua_asc_id);
+        qb.push(r") ORDER BY updated_at ASC, id ASC");
     }
-    match &sort {
-        Some(ReproCombinedCursorSortSort::UaAsc { cur_ua_asc_ts, cur_ua_asc_id }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_8__", r"AND (updated_at, id) > (#{cur_ua_asc_ts}, #{cur_ua_asc_id}) ORDER BY updated_at ASC, id ASC");
-            cur_ua_asc_ts_cg = Some(cur_ua_asc_ts);
-            included_params.push("cur_ua_asc_ts");
-            cur_ua_asc_id_cg = Some(cur_ua_asc_id);
-            included_params.push("cur_ua_asc_id");
-        }
-        Some(ReproCombinedCursorSortSort::UaDesc { cur_ua_desc_ts, cur_ua_desc_id }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_9__", r"AND (updated_at, id) < (#{cur_ua_desc_ts}, #{cur_ua_desc_id}) ORDER BY updated_at DESC, id DESC");
-            cur_ua_desc_ts_cg = Some(cur_ua_desc_ts);
-            included_params.push("cur_ua_desc_ts");
-            cur_ua_desc_id_cg = Some(cur_ua_desc_id);
-            included_params.push("cur_ua_desc_id");
-        }
-        Some(ReproCombinedCursorSortSort::NameAsc { cur_name_asc_val, cur_name_asc_id }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_10__", r"AND (name, id) > (#{cur_name_asc_val}, #{cur_name_asc_id}) ORDER BY name ASC, id ASC");
-            cur_name_asc_val_cg = Some(cur_name_asc_val);
-            included_params.push("cur_name_asc_val");
-            cur_name_asc_id_cg = Some(cur_name_asc_id);
-            included_params.push("cur_name_asc_id");
-        }
-        Some(ReproCombinedCursorSortSort::NameDesc { cur_name_desc_val, cur_name_desc_id }) => {
-            final_sql = final_sql.replace(r"__AM_BLK_11__", r"AND (name, id) < (#{cur_name_desc_val}, #{cur_name_desc_id}) ORDER BY name DESC, id DESC");
-            cur_name_desc_val_cg = Some(cur_name_desc_val);
-            included_params.push("cur_name_desc_val");
-            cur_name_desc_id_cg = Some(cur_name_desc_id);
-            included_params.push("cur_name_desc_id");
-        }
-        None => {}
+    qb.push(r"
+  ");
+    if let Some(ReproCombinedCursorSortSort::UaDesc { cur_ua_desc_ts, cur_ua_desc_id, .. }) = &sort {
+        qb.push(r"AND (updated_at, id) < (");
+        qb.push_bind(cur_ua_desc_ts);
+        qb.push(r", ");
+        qb.push_bind(cur_ua_desc_id);
+        qb.push(r") ORDER BY updated_at DESC, id DESC");
     }
-    final_sql = final_sql.replace(r"__AM_BLK_0__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_1__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_8__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_9__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_10__", "");
-    final_sql = final_sql.replace(r"__AM_BLK_11__", "");
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{min_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    final_sql = final_sql.replace(r"#{lim}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"req_names") {
-        final_sql = final_sql.replace(r"#{req_names?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+  ");
+    if let Some(ReproCombinedCursorSortSort::NameAsc { cur_name_asc_val, cur_name_asc_id, .. }) = &sort {
+        qb.push(r"AND (name, id) > (");
+        qb.push_bind(cur_name_asc_val);
+        qb.push(r", ");
+        qb.push_bind(cur_name_asc_id);
+        qb.push(r") ORDER BY name ASC, id ASC");
     }
-    if included_params.contains(&r"req_emails") {
-        final_sql = final_sql.replace(r"#{req_emails?}", &format!("${}", param_counter));
-        param_counter += 1;
+    qb.push(r"
+  ");
+    if let Some(ReproCombinedCursorSortSort::NameDesc { cur_name_desc_val, cur_name_desc_id, .. }) = &sort {
+        qb.push(r"AND (name, id) < (");
+        qb.push_bind(cur_name_desc_val);
+        qb.push(r", ");
+        qb.push_bind(cur_name_desc_id);
+        qb.push(r") ORDER BY name DESC, id DESC");
     }
-    if included_params.contains(&r"name_exact") {
-        final_sql = final_sql.replace(r"#{name_exact?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"name_starts_with") {
-        final_sql = final_sql.replace(r"#{name_starts_with?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"updated_from") {
-        final_sql = final_sql.replace(r"#{updated_from?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"updated_to") {
-        final_sql = final_sql.replace(r"#{updated_to?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"platforms") {
-        final_sql = final_sql.replace(r"#{platforms?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_ua_asc_ts") {
-        final_sql = final_sql.replace(r"#{cur_ua_asc_ts}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_ua_asc_id") {
-        final_sql = final_sql.replace(r"#{cur_ua_asc_id}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_ua_desc_ts") {
-        final_sql = final_sql.replace(r"#{cur_ua_desc_ts}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_ua_desc_id") {
-        final_sql = final_sql.replace(r"#{cur_ua_desc_id}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_name_asc_val") {
-        final_sql = final_sql.replace(r"#{cur_name_asc_val}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_name_asc_id") {
-        final_sql = final_sql.replace(r"#{cur_name_asc_id}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_name_desc_val") {
-        final_sql = final_sql.replace(r"#{cur_name_desc_val}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"cur_name_desc_id") {
-        final_sql = final_sql.replace(r"#{cur_name_desc_id}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&min_id);
-    query = query.bind(&lim);
-    if included_params.contains(&r"req_names") {
-        query = query.bind(req_names.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"req_emails") {
-        query = query.bind(req_emails.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"name_exact") {
-        query = query.bind(name_exact.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"name_starts_with") {
-        query = query.bind(name_starts_with.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"updated_from") {
-        query = query.bind(updated_from.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"updated_to") {
-        query = query.bind(updated_to.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"platforms") {
-        query = query.bind(platforms.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"cur_ua_asc_ts") {
-        query = query.bind(cur_ua_asc_ts_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_ua_asc_id") {
-        query = query.bind(cur_ua_asc_id_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_ua_desc_ts") {
-        query = query.bind(cur_ua_desc_ts_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_ua_desc_id") {
-        query = query.bind(cur_ua_desc_id_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_name_asc_val") {
-        query = query.bind(cur_name_asc_val_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_name_asc_id") {
-        query = query.bind(cur_name_asc_id_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_name_desc_val") {
-        query = query.bind(cur_name_desc_val_cg.unwrap());
-    }
-
-    if included_params.contains(&r"cur_name_desc_id") {
-        query = query.bind(cur_name_desc_id_cg.unwrap());
-    }
+    qb.push(r"
+LIMIT ");
+    qb.push_bind(&lim);
+    qb.push(r";");
+    let query = qb.build();
 
     let rows = query.fetch_all(executor).await?;
     let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {

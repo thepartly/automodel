@@ -240,7 +240,10 @@ impl ChoiceVariant {
 #[derive(Debug, Clone)]
 pub(crate) struct NestedChoiceBlock {
     /// The inner SQL content (without the surrounding `#[` `]`), exactly as it
-    /// appears inside the branch block so codegen string replacement matches.
+    /// appears inside the branch block. Retained for parser fidelity and future
+    /// codegen use; the QueryBuilder path re-derives it by tokenizing the parent
+    /// block body, so it is not currently read directly.
+    #[allow(dead_code)]
     pub sql_content: String,
     /// Clean parameter names (suffixes stripped) referenced in this nested block,
     /// in source order. `params[0]` is the include gate.

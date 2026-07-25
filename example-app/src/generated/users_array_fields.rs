@@ -203,53 +203,26 @@ pub struct UpdateUserSocialLinksDiffItem {
 /// Update user social links with conditional set using diff comparison
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, social_links = #{social_links?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, social_links;"))]
 pub async fn update_user_social_links_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserSocialLinksDiffParams, new: &UpdateUserSocialLinksDiffParams, user_id: i32) -> Result<UpdateUserSocialLinksDiffItem, super::Error<UpdateUserSocialLinksDiffConstraints>> {
-    let mut final_sql = r"UPDATE public.users
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users
 SET updated_at = NOW()
-#[, name = #{name?}]
-#[, social_links = #{social_links?}]
-WHERE id = $1
-RETURNING id, name, email, social_links;".to_string();
-    let mut included_params = Vec::new();
-
+");
     if old.name != new.name {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(&new.name);
     }
-
+    qb.push(r"
+");
     if old.social_links != new.social_links {
-        final_sql = final_sql.replace(r"#[, social_links = #{social_links?}]", r", social_links = #{social_links?}");
-        included_params.push("social_links");
-    } else {
-        final_sql = final_sql.replace(r"#[, social_links = #{social_links?}]", "");
+        qb.push(r", social_links = ");
+        qb.push_bind(serde_json::to_value(&new.social_links).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"social_links") {
-        final_sql = final_sql.replace(r"#{social_links?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(&new.name);
-    }
-
-    if included_params.contains(&r"social_links") {
-        let social_links_json = serde_json::to_value(&new.social_links).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-        query = query.bind(social_links_json);
-    }
+    qb.push(r"
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r"
+RETURNING id, name, email, social_links;");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -313,53 +286,26 @@ pub struct UpdateUserSocialLinksConditionalItem {
 /// Update user social links with conditional set (no diff struct)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, social_links = #{social_links?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, social_links;"))]
 pub async fn update_user_social_links_conditional(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, social_links: Option<Vec<crate::models::UserSocialLink>>, user_id: i32) -> Result<UpdateUserSocialLinksConditionalItem, super::Error<UpdateUserSocialLinksConditionalConstraints>> {
-    let mut final_sql = r"UPDATE public.users
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users
 SET updated_at = NOW()
-#[, name = #{name?}]
-#[, social_links = #{social_links?}]
-WHERE id = $1
-RETURNING id, name, email, social_links;".to_string();
-    let mut included_params = Vec::new();
-
+");
     if name.is_some() {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(name.as_ref().unwrap());
     }
-
+    qb.push(r"
+");
     if social_links.is_some() {
-        final_sql = final_sql.replace(r"#[, social_links = #{social_links?}]", r", social_links = #{social_links?}");
-        included_params.push("social_links");
-    } else {
-        final_sql = final_sql.replace(r"#[, social_links = #{social_links?}]", "");
+        qb.push(r", social_links = ");
+        qb.push_bind(serde_json::to_value(&social_links.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);
     }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"social_links") {
-        final_sql = final_sql.replace(r"#{social_links?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(name.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"social_links") {
-        let social_links_json = serde_json::to_value(&social_links.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-        query = query.bind(social_links_json);
-    }
+    qb.push(r"
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r"
+RETURNING id, name, email, social_links;");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -700,53 +646,27 @@ pub struct UpdateUserTagsDiffItem {
 /// Update user tags with conditional diff (jsonb[] column)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, tags = #{tags?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, tags;"))]
 pub async fn update_user_tags_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserTagsDiffParams, new: &UpdateUserTagsDiffParams, user_id: i32) -> Result<UpdateUserTagsDiffItem, super::Error<UpdateUserTagsDiffConstraints>> {
-    let mut final_sql = r"UPDATE public.users
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users
 SET updated_at = NOW()
-#[, name = #{name?}]
-#[, tags = #{tags?}]
-WHERE id = $1
-RETURNING id, name, email, tags;".to_string();
-    let mut included_params = Vec::new();
-
+");
     if old.name != new.name {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(&new.name);
     }
-
+    qb.push(r"
+");
     if old.tags != new.tags {
-        final_sql = final_sql.replace(r"#[, tags = #{tags?}]", r", tags = #{tags?}");
-        included_params.push("tags");
-    } else {
-        final_sql = final_sql.replace(r"#[, tags = #{tags?}]", "");
-    }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"tags") {
-        final_sql = final_sql.replace(r"#{tags?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(&new.name);
-    }
-
-    if included_params.contains(&r"tags") {
+        qb.push(r", tags = ");
         let tags_json: Vec<Option<serde_json::Value>> = new.tags.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;
-        query = query.bind(tags_json);
+        qb.push_bind(tags_json);
     }
+    qb.push(r"
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r"
+RETURNING id, name, email, tags;");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -809,53 +729,27 @@ pub struct UpdateUserTagsConditionalItem {
 /// Update user tags with conditional set (jsonb[] column, no diff struct)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, tags = #{tags?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, tags;"))]
 pub async fn update_user_tags_conditional(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, tags: Option<Vec<Option<crate::models::UserTag>>>, user_id: i32) -> Result<UpdateUserTagsConditionalItem, super::Error<UpdateUserTagsConditionalConstraints>> {
-    let mut final_sql = r"UPDATE public.users
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users
 SET updated_at = NOW()
-#[, name = #{name?}]
-#[, tags = #{tags?}]
-WHERE id = $1
-RETURNING id, name, email, tags;".to_string();
-    let mut included_params = Vec::new();
-
+");
     if name.is_some() {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(name.as_ref().unwrap());
     }
-
+    qb.push(r"
+");
     if tags.is_some() {
-        final_sql = final_sql.replace(r"#[, tags = #{tags?}]", r", tags = #{tags?}");
-        included_params.push("tags");
-    } else {
-        final_sql = final_sql.replace(r"#[, tags = #{tags?}]", "");
-    }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"tags") {
-        final_sql = final_sql.replace(r"#{tags?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(name.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"tags") {
+        qb.push(r", tags = ");
         let tags_json: Vec<Option<serde_json::Value>> = tags.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;
-        query = query.bind(tags_json);
+        qb.push_bind(tags_json);
     }
+    qb.push(r"
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r"
+RETURNING id, name, email, tags;");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -1193,53 +1087,27 @@ pub struct UpdateUserLabelsDiffItem {
 /// Update user labels with conditional diff (required jsonb[] column)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, labels = #{labels?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, labels;"))]
 pub async fn update_user_labels_diff(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, old: &UpdateUserLabelsDiffParams, new: &UpdateUserLabelsDiffParams, user_id: i32) -> Result<UpdateUserLabelsDiffItem, super::Error<UpdateUserLabelsDiffConstraints>> {
-    let mut final_sql = r"UPDATE public.users
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users
 SET updated_at = NOW()
-#[, name = #{name?}]
-#[, labels = #{labels?}]
-WHERE id = $1
-RETURNING id, name, email, labels;".to_string();
-    let mut included_params = Vec::new();
-
+");
     if old.name != new.name {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(&new.name);
     }
-
+    qb.push(r"
+");
     if old.labels != new.labels {
-        final_sql = final_sql.replace(r"#[, labels = #{labels?}]", r", labels = #{labels?}");
-        included_params.push("labels");
-    } else {
-        final_sql = final_sql.replace(r"#[, labels = #{labels?}]", "");
-    }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"labels") {
-        final_sql = final_sql.replace(r"#{labels?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(&new.name);
-    }
-
-    if included_params.contains(&r"labels") {
+        qb.push(r", labels = ");
         let labels_json: Vec<Option<serde_json::Value>> = new.labels.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;
-        query = query.bind(labels_json);
+        qb.push_bind(labels_json);
     }
+    qb.push(r"
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r"
+RETURNING id, name, email, labels;");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {
@@ -1301,53 +1169,27 @@ pub struct UpdateUserLabelsConditionalItem {
 /// Update user labels with conditional set (required jsonb[] column, no diff struct)
 #[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET updated_at = NOW()\n#[, name = #{name?}]\n#[, labels = #{labels?}]\nWHERE id = #{user_id}\nRETURNING id, name, email, labels;"))]
 pub async fn update_user_labels_conditional(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: Option<String>, labels: Option<Vec<Option<crate::models::UserTag>>>, user_id: i32) -> Result<UpdateUserLabelsConditionalItem, super::Error<UpdateUserLabelsConditionalConstraints>> {
-    let mut final_sql = r"UPDATE public.users
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"UPDATE public.users
 SET updated_at = NOW()
-#[, name = #{name?}]
-#[, labels = #{labels?}]
-WHERE id = $1
-RETURNING id, name, email, labels;".to_string();
-    let mut included_params = Vec::new();
-
+");
     if name.is_some() {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", r", name = #{name?}");
-        included_params.push("name");
-    } else {
-        final_sql = final_sql.replace(r"#[, name = #{name?}]", "");
+        qb.push(r", name = ");
+        qb.push_bind(name.as_ref().unwrap());
     }
-
+    qb.push(r"
+");
     if labels.is_some() {
-        final_sql = final_sql.replace(r"#[, labels = #{labels?}]", r", labels = #{labels?}");
-        included_params.push("labels");
-    } else {
-        final_sql = final_sql.replace(r"#[, labels = #{labels?}]", "");
-    }
-
-    #[allow(unused_assignments)]
-    let mut param_counter = 1;
-    final_sql = final_sql.replace(r"#{user_id}", &format!("${}", param_counter));
-    param_counter += 1;
-    if included_params.contains(&r"name") {
-        final_sql = final_sql.replace(r"#{name?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    if included_params.contains(&r"labels") {
-        final_sql = final_sql.replace(r"#{labels?}", &format!("${}", param_counter));
-        param_counter += 1;
-    }
-    let _ = param_counter; // Suppress unused assignment warning
-
-    let mut query = sqlx::query(&final_sql);
-
-    query = query.bind(&user_id);
-    if included_params.contains(&r"name") {
-        query = query.bind(name.as_ref().unwrap());
-    }
-
-    if included_params.contains(&r"labels") {
+        qb.push(r", labels = ");
         let labels_json: Vec<Option<serde_json::Value>> = labels.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;
-        query = query.bind(labels_json);
+        qb.push_bind(labels_json);
     }
+    qb.push(r"
+WHERE id = ");
+    qb.push_bind(&user_id);
+    qb.push(r"
+RETURNING id, name, email, labels;");
+    let query = qb.build();
 
     let row = query.fetch_one(executor).await?;
     let result: Result<_, sqlx::Error> = (|| {

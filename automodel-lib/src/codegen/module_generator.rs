@@ -4,7 +4,6 @@ use crate::codegen::types_generator::{
     generate_result_struct_with_name, generate_return_type, generate_structured_params_signature,
     generate_structured_params_struct, strip_input_suffix,
 };
-use crate::query_definition::ChoiceVariant;
 use crate::query_definition::{ExpectedResult, QueryDefinition, TelemetryLevel};
 use crate::query_definition_rt::QueryDefinitionRuntime;
 use crate::rust_type::{InputParam, OutputColumn};
@@ -745,23 +744,19 @@ pub fn generate_function_code_without_enums(
     // Generate function body
     let function_body = if !query.choice_groups.is_empty() {
         let mut body = String::new();
-        if choice_group_is_mixed(query, type_info) {
-            let parsed_sql = type_info.parsed_sql.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "internal error: mixed choice-group query '{}' has no parsed conditional SQL",
-                    query.name
-                )
-            })?;
-            generate_mixed_choice_conditional_body(
-                &mut body,
-                query,
-                type_info,
-                parsed_sql,
-                &base_return_type,
-            )?;
-        } else {
-            generate_choice_group_function_body(&mut body, query, type_info, &base_return_type)?;
-        }
+        let parsed_sql = type_info.parsed_sql.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal error: choice-group query '{}' has no parsed conditional SQL",
+                query.name
+            )
+        })?;
+        generate_choice_group_function_body(
+            &mut body,
+            query,
+            type_info,
+            parsed_sql,
+            &base_return_type,
+        )?;
         body
     } else {
         generate_function_body(query, type_info, &base_return_type, defaults)?
@@ -1056,56 +1051,6 @@ fn choice_group_enum_name(query_name: &str, selector: &str) -> String {
     format!("{}{}", to_pascal_case(query_name), to_pascal_case(selector))
 }
 
-/// Whether the query needs the membership-based body generator: it mixes a
-/// choice group with additive (ungrouped) `#[...]` conditional blocks, or it
-/// declares more than one choice group. When false (a single group whose every
-/// conditional block belongs to it) the isolated-variant generator is used.
-fn choice_group_is_mixed(query: &QueryDefinition, type_info: &QueryTypeInfo) -> bool {
-    if query.choice_groups.is_empty() {
-        return false;
-    }
-    // Multiple independent groups always use the membership-based generator.
-    if query.choice_groups.len() > 1 {
-        return true;
-    }
-    // Any nested optional block (Option B) requires runtime include/exclude of a
-    // sub-portion of a branch, which only the membership-based generator does.
-    if query
-        .choice_groups
-        .iter()
-        .any(|g| g.variants.iter().any(|v| !v.nested_blocks.is_empty()))
-    {
-        return true;
-    }
-    // Any branch that spans more than one conditional block (e.g. a projection
-    // fragment paired with a matching `LEFT JOIN` fragment) can't be represented
-    // by a single pre-computed `sql_variants` entry, so it needs the
-    // membership-based generator.
-    if query
-        .choice_groups
-        .iter()
-        .any(|g| g.variants.iter().any(|v| v.block_indices.len() > 1))
-    {
-        return true;
-    }
-    let total_blocks = type_info
-        .parsed_sql
-        .as_ref()
-        .map(|p| p.conditional_blocks.len())
-        .unwrap_or(0);
-    let grouped_blocks: usize = query
-        .choice_groups
-        .iter()
-        .map(|g| {
-            g.variants
-                .iter()
-                .map(|v| v.block_indices.len())
-                .sum::<usize>()
-        })
-        .sum();
-    total_blocks > grouped_blocks
-}
-
 /// Build a map from clean parameter name to its resolved `InputParam`
 /// (first occurrence wins). `input_types` is aligned positionally with the
 /// source-order parameter names of `query.sql`.
@@ -1275,227 +1220,77 @@ fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTyp
     parts.join(", ")
 }
 
-/// Emit a single `query = query.bind(...)` line (indented by `indent`) for one
-/// parameter, referencing either a destructured variant field (already a
-/// reference) or a top-level argument.
-fn push_choice_bind(
-    body: &mut String,
-    ip: Option<&InputParam>,
-    clean_name: &str,
-    is_variant_field: bool,
-    indent: &str,
-) {
-    // Field bindings come from `match &selector`, so they are already references;
-    // top-level args are referenced with `&`.
-    let value_ref = if is_variant_field {
-        clean_name.to_string()
-    } else {
-        format!("&{}", clean_name)
-    };
-
-    let needs_json = ip.map(|i| i.field.needs_json_wrapper).unwrap_or(false);
-    if needs_json {
-        body.push_str(&format!(
-            "{indent}let {name}_json = serde_json::to_value({value}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n",
-            indent = indent,
-            name = clean_name,
-            value = value_ref,
-        ));
-        body.push_str(&format!(
-            "{indent}query = query.bind({name}_json);\n",
-            indent = indent,
-            name = clean_name,
-        ));
-    } else {
-        body.push_str(&format!(
-            "{indent}query = query.bind({value});\n",
-            indent = indent,
-            value = value_ref,
-        ));
-    }
-}
-
-/// Build a match arm pattern for a variant, destructuring all of its parameters
-/// (variant fields).
-fn choice_variant_pattern(enum_name: &str, variant: &ChoiceVariant, bind_fields: bool) -> String {
-    let pascal = to_pascal_case(&variant.variant);
-    let mut fields: Vec<String> = Vec::new();
-    for p in variant.all_params() {
-        if fields.contains(&p) {
-            continue;
-        }
-        fields.push(p);
-    }
-    if fields.is_empty() {
-        format!("{}::{}", enum_name, pascal)
-    } else if bind_fields {
-        format!("{}::{} {{ {} }}", enum_name, pascal, fields.join(", "))
-    } else {
-        format!("{}::{} {{ .. }}", enum_name, pascal)
-    }
-}
-
-/// Generate the function body for a mutually-exclusive choice-group query.
-fn generate_choice_group_function_body(
-    body: &mut String,
-    query: &QueryDefinition,
-    type_info: &QueryTypeInfo,
-    return_type: &str,
-) -> Result<()> {
-    let group = &query.choice_groups[0];
-    let type_map = choice_group_type_map(query, type_info);
-    let grouped: std::collections::HashSet<String> =
-        group.variants.iter().flat_map(|v| v.all_params()).collect();
-    let enum_name = choice_group_enum_name(&query.name, &group.selector);
-    let selector = &group.selector;
-
-    // Positional SQL for a given block index (base is sql_variants[0]).
-    let variant_sql = |block_index: usize| -> Result<&str> {
-        query
-            .sql_variants
-            .get(block_index + 1)
-            .map(|(sql, _, _)| sql.as_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing pre-computed SQL variant for choice-group branch (block {})",
-                    block_index
-                )
-            })
-    };
-    let variant_param_names = |block_index: usize| -> &[String] {
-        query
-            .sql_variants
-            .get(block_index + 1)
-            .map(|(_, names, _)| names.as_slice())
-            .unwrap_or(&[])
-    };
-
-    // 1. Select the SQL string based on the chosen variant.
-    body.push_str(&format!("    let sql: &str = match &{} {{\n", selector));
-    for variant in &group.variants {
-        let pattern = choice_variant_pattern(&enum_name, variant, false);
-        let literal = generate_indented_raw_string_literal(variant_sql(variant.block_indices[0])?);
-        let wrapped = if group.required {
-            pattern
-        } else {
-            format!("Some({})", pattern)
-        };
-        body.push_str(&format!(
-            "        {} => {},\n",
-            wrapped,
-            literal.trim_start()
-        ));
-    }
-    if !group.required {
-        let base_sql = query
-            .sql_variants
-            .first()
-            .map(|(sql, _, _)| sql.as_str())
-            .unwrap_or("");
-        let literal = generate_indented_raw_string_literal(base_sql);
-        body.push_str(&format!("        None => {},\n", literal.trim_start()));
-    }
-    body.push_str("    };\n\n");
-
-    // 2. Bind parameters per variant, following each variant's positional order.
-    body.push_str("    let mut query = sqlx::query(sql);\n");
-    body.push_str(&format!("    match &{} {{\n", selector));
-    for variant in &group.variants {
-        let pattern = choice_variant_pattern(&enum_name, variant, true);
-        let wrapped = if group.required {
-            pattern
-        } else {
-            format!("Some({})", pattern)
-        };
-        body.push_str(&format!("        {} => {{\n", wrapped));
-        for raw_name in variant_param_names(variant.block_indices[0]) {
-            let clean = strip_input_suffix(raw_name);
-            let is_variant_field = grouped.contains(&clean);
-            push_choice_bind(
-                body,
-                type_map.get(&clean),
-                &clean,
-                is_variant_field,
-                "            ",
-            );
-        }
-        body.push_str("        }\n");
-    }
-    if !group.required {
-        // No branch chosen: bind only base (non-grouped) params.
-        body.push_str("        None => {\n");
-        for raw_name in query
-            .sql_variants
-            .first()
-            .map(|(_, names, _)| names.as_slice())
-            .unwrap_or(&[])
-        {
-            let clean = strip_input_suffix(raw_name);
-            push_choice_bind(body, type_map.get(&clean), &clean, false, "            ");
-        }
-        body.push_str("        }\n");
-    }
-    body.push_str("    }\n\n");
-
-    generate_query_execution(body, query, type_info, return_type);
-    Ok(())
-}
-
-/// Unique, position-based marker for the `i`-th top-level conditional block.
+/// Recursively emit `qb` push / push_bind statements for the tokens of one
+/// conditional block body (already tokenized from directive-stripped
+/// `sql_content`).
 ///
-/// Used by the mixed-choice generator instead of the block's body text so that
-/// two blocks sharing identical bodies (e.g. two `NULL` off-branches in
-/// different choice groups) can still be addressed individually — a plain
-/// `String::replace` keyed on `#[NULL]` would otherwise rewrite *every*
-/// occurrence and corrupt the SQL.
-fn mixed_block_marker(i: usize) -> String {
-    format!("__AM_BLK_{}__", i)
-}
-
-/// Rewrite every top-level `#[...]` conditional block in `sql` into its unique
-/// positional sentinel (`mixed_block_marker`), left-to-right. Bracket nesting is
-/// honored exactly as in `parse_sql_with_conditionals`, so nested `#[...]` inside
-/// a block stay part of that block's body and the emitted indices line up 1:1
-/// with `ParsedSql::conditional_blocks`.
-fn sentinelize_top_level_blocks(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut chars = sql.chars().peekable();
-    let mut idx = 0usize;
-    while let Some(ch) = chars.next() {
-        if ch == '#' {
-            if let Some(&'[') = chars.peek() {
-                chars.next(); // consume '['
-                let mut depth = 1usize;
-                while let Some(inner) = chars.next() {
-                    if inner == '[' {
-                        depth += 1;
-                    } else if inner == ']' {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
+/// `grouped_top` is true when these tokens form the immediate body of a chosen
+/// choice-group branch: their direct parameters are mandatory enum fields that
+/// have already been destructured as references and are bound as-is. Otherwise
+/// (additive blocks and any nested `#[...]` block) parameters are `Option`-typed
+/// — plain `Option<T>` arguments or destructured `Option` enum fields — and are
+/// unwrapped via `.as_ref().unwrap()`. Nested blocks are always gated by their
+/// first parameter's `is_some()` and emit their bodies in non-`grouped_top`
+/// mode. All values flow through `push_bind`, never string interpolation.
+fn emit_choice_group_block_tokens(
+    body: &mut String,
+    tokens: &[SqlToken],
+    indent: &str,
+    grouped_top: bool,
+    all_params: &[String],
+    type_info: &QueryTypeInfo,
+) {
+    for token in tokens {
+        match token {
+            SqlToken::Lit(s) => {
+                if !s.is_empty() {
+                    body.push_str(&format!("{}qb.push({});\n", indent, raw_string_literal(s)));
                 }
-                out.push_str(&mixed_block_marker(idx));
-                idx += 1;
-                continue;
+            }
+            SqlToken::Param(name) => {
+                let clean = name.trim_end_matches('?');
+                let owner = if grouped_top {
+                    clean.to_string()
+                } else {
+                    format!("{}.as_ref().unwrap()", clean)
+                };
+                if let Some(ti) = find_input_type(all_params, type_info, clean) {
+                    emit_push_bind(body, indent, ti, &owner, true, clean);
+                }
+            }
+            SqlToken::Block { inner, params } => {
+                if params.is_empty() {
+                    emit_choice_group_block_tokens(
+                        body, inner, indent, false, all_params, type_info,
+                    );
+                    continue;
+                }
+                let gate = params[0].trim_end_matches('?');
+                body.push_str(&format!("{}if {}.is_some() {{\n", indent, gate));
+                let inner_indent = format!("{}    ", indent);
+                emit_choice_group_block_tokens(
+                    body, inner, &inner_indent, false, all_params, type_info,
+                );
+                body.push_str(&format!("{}}}\n", indent));
             }
         }
-        out.push(ch);
     }
-    out
 }
 
-/// Generate the function body for a query that combines one or more choice
-/// groups with any number of additive (ungrouped) `#[...]` conditional blocks.
+/// Generate the function body for any choice-group query.
 ///
-/// Additive blocks keep their runtime `if <param>.is_some()` include/exclude
-/// behavior; each choice group is driven by its own generated selector enum via
-/// a dedicated `match`. Parameter numbering and binding are unified across all
-/// blocks using the same source-order `included_params` membership mechanism as
-/// the pure-additive generator, which is safe because the parser guarantees
-/// every grouped parameter belongs to exactly one branch of exactly one group.
-fn generate_mixed_choice_conditional_body(
+/// Handles the full range of choice-group shapes: a single group, multiple
+/// independent groups, variants spanning several conditional blocks, nested
+/// optional (`#[...]`) blocks inside a branch, and additive (ungrouped)
+/// conditional blocks mixed in.
+///
+/// The base SQL is tokenized and emitted through a `sqlx::QueryBuilder`:
+/// additive blocks become `if <param>.is_some()` guards, and each choice-group
+/// block becomes an `if let <Enum>::<Variant> { .. } = &<selector>` guard that
+/// pushes only the selected branch. Because `push_bind` assigns `$N`
+/// placeholders in push (source) order, no sentinelization, renumbering or
+/// `included_params` bookkeeping is required.
+fn generate_choice_group_function_body(
     body: &mut String,
     query: &QueryDefinition,
     type_info: &QueryTypeInfo,
@@ -1512,312 +1307,251 @@ fn generate_mixed_choice_conditional_body(
         );
     }
 
-    let type_map = choice_group_type_map(query, type_info);
     let all_params = parse_parameter_names_from_sql(&query.sql);
 
-    // Source-order block indices owned by any choice group (additive blocks are
-    // every other conditional block). Used to skip grouped blocks below.
-    let grouped_block_indices: std::collections::HashSet<usize> = query
-        .choice_groups
-        .iter()
-        .flat_map(|g| g.variants.iter().flat_map(|v| v.block_indices.iter().copied()))
-        .collect();
-    // Every grouped-branch parameter across all groups (clean names), including
-    // nested optional-block params (Option B).
-    let grouped_fields: std::collections::HashSet<String> = query
-        .choice_groups
-        .iter()
-        .flat_map(|g| g.variants.iter().flat_map(|v| v.all_params()))
-        .collect();
-
-    // Resolve the `InputParam` for a clean parameter name via source order.
-    let type_of = |clean: &str| -> Option<&InputParam> {
-        all_params
-            .iter()
-            .position(|p| p.trim_end_matches('?') == clean)
-            .and_then(|idx| type_info.input_types.get(idx))
-    };
-
-    // Bake `$N` for base (non-conditional) params into the template up front,
-    // mirroring the additive generator so runtime renumbering stays aligned.
-    let mut sql_template = parsed_sql.base_sql.clone();
-    let mut current_param_num = 1usize;
-    for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        // Only truly unconditional params are baked as `$N` up front. A choice-
-        // group branch parameter has no `?` marker (it is mandatory once its
-        // variant is chosen) yet is still conditional, so it must be numbered
-        // and bound via its group's `match`, not treated as a base param.
-        if !param_name.ends_with('?') && !grouped_fields.contains(param_name.trim_end_matches('?'))
-        {
-            sql_template = sql_template.replace(
-                &format!("#{{{}}}", param_name),
-                &format!("${}", current_param_num),
-            );
-            current_param_num += 1;
-        }
-    }
-
-    // Swap every top-level `#[...]` block for its unique positional sentinel so
-    // the include/exclude replacements below target one block at a time, even
-    // when two blocks share identical body text.
-    sql_template = sentinelize_top_level_blocks(&sql_template);
-
-    body.push_str("    let mut final_sql = r\"");
-    body.push_str(&sql_template);
-    body.push_str("\".to_string();\n");
-    body.push_str("    #[allow(unused_mut, unused_variables)]\n");
-    body.push_str("    let mut included_params: Vec<&str> = Vec::new();\n\n");
-
-    // 1. Additive (ungrouped) blocks: include/exclude by their first parameter.
-    for (i, block) in parsed_sql.conditional_blocks.iter().enumerate() {
-        if grouped_block_indices.contains(&i) || block.parameters.is_empty() {
-            continue;
-        }
-        let clean_gate = block.parameters[0].trim_end_matches('?');
-        let marker = mixed_block_marker(i);
-        body.push_str(&format!("    if {}.is_some() {{\n", clean_gate));
-        body.push_str(&format!(
-            "        final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
-            marker, block.sql_content
-        ));
-        for param_name in &block.parameters {
-            body.push_str(&format!(
-                "        included_params.push(\"{}\");\n",
-                param_name.trim_end_matches('?')
-            ));
-        }
-        body.push_str("    } else {\n");
-        body.push_str(&format!(
-            "        final_sql = final_sql.replace(r\"{}\", \"\");\n",
-            marker
-        ));
-        body.push_str("    }\n\n");
-    }
-
-    // 2. Choice groups: for each group declare a reference local per branch
-    //    field, then select the active branch's SQL and include its parameters.
-    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for group in &query.choice_groups {
-        for variant in &group.variants {
-            for p in variant.all_params() {
-                let clean = strip_input_suffix(&p);
-                if !declared.insert(clean.clone()) {
-                    continue;
-                }
-                let ty = type_map
-                    .get(&clean)
-                    .map(|ip| ip.rust_type().to_string())
-                    .unwrap_or_else(|| "String".to_string());
-                body.push_str(&format!(
-                    "    let mut {}_cg: Option<&{}> = None;\n",
-                    clean, ty
-                ));
-            }
-        }
-    }
-
-    for group in &query.choice_groups {
-        let enum_name = choice_group_enum_name(&query.name, &group.selector);
-        let selector = &group.selector;
-        body.push_str(&format!("    match &{} {{\n", selector));
-        for variant in &group.variants {
-            let pascal = to_pascal_case(&variant.variant);
-            // Destructure every field of the branch (direct + nested).
-            let mut fields: Vec<String> = Vec::new();
-            for p in variant.all_params() {
-                let clean = strip_input_suffix(&p);
-                if !fields.contains(&clean) {
-                    fields.push(clean);
-                }
-            }
-            // Direct (mandatory) params are active as soon as the branch is chosen;
-            // nested-block params are gated separately below.
-            let direct: std::collections::HashSet<String> = variant
-                .params
-                .iter()
-                .map(|p| strip_input_suffix(p))
-                .collect();
-            let pattern = if fields.is_empty() {
-                format!("{}::{}", enum_name, pascal)
-            } else {
-                format!("{}::{} {{ {} }}", enum_name, pascal, fields.join(", "))
-            };
-            let arm_pat = if group.required {
-                pattern
-            } else {
-                format!("Some({})", pattern)
-            };
-            body.push_str(&format!("        {} => {{\n", arm_pat));
-            // Include every conditional block this branch spans (its content may
-            // still contain nested `#[...]` markers, resolved next).
+    // Map each top-level conditional-block index to its owning (group, variant).
+    let mut block_owner: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (gi, group) in query.choice_groups.iter().enumerate() {
+        for (vi, variant) in group.variants.iter().enumerate() {
             for &bi in &variant.block_indices {
-                let block = &parsed_sql.conditional_blocks[bi];
-                body.push_str(&format!(
-                    "            final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
-                    mixed_block_marker(bi),
-                    block.sql_content
-                ));
-            }
-            // Direct fields: stage the reference and mark included unconditionally.
-            for f in &fields {
-                if direct.contains(f) {
-                    body.push_str(&format!("            {}_cg = Some({});\n", f, f));
-                    body.push_str(&format!("            included_params.push(\"{}\");\n", f));
-                }
-            }
-            // Nested optional blocks (Option B): include only when the gate field
-            // (first param) is `Some`; then stage each field and mark it included.
-            for nb in &variant.nested_blocks {
-                if nb.params.is_empty() {
-                    continue;
-                }
-                let gate = &nb.params[0];
-                let inner_marker = format!("#[{}]", nb.sql_content);
-                body.push_str(&format!("            if {}.is_some() {{\n", gate));
-                body.push_str(&format!(
-                    "                final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
-                    inner_marker, nb.sql_content
-                ));
-                for p in &nb.params {
-                    body.push_str(&format!("                {}_cg = {}.as_ref();\n", p, p));
-                    body.push_str(&format!(
-                        "                included_params.push(\"{}\");\n",
-                        p
-                    ));
-                }
-                body.push_str("            } else {\n");
-                body.push_str(&format!(
-                    "                final_sql = final_sql.replace(r\"{}\", \"\");\n",
-                    inner_marker
-                ));
-                body.push_str("            }\n");
-            }
-            body.push_str("        }\n");
-        }
-        if !group.required {
-            body.push_str("        None => {}\n");
-        }
-        body.push_str("    }\n");
-    }
-    // Remove any grouped block that was not selected (across all groups).
-    for group in &query.choice_groups {
-        for variant in &group.variants {
-            for &bi in &variant.block_indices {
-                body.push_str(&format!(
-                    "    final_sql = final_sql.replace(r\"{}\", \"\");\n",
-                    mixed_block_marker(bi)
-                ));
-            }
-        }
-    }
-    body.push('\n');
-
-    // 3. Renumber `#{...}` placeholders to `$N` in final SQL order.
-    body.push_str("    #[allow(unused_assignments)]\n");
-    body.push_str("    let mut param_counter = 1;\n");
-    for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        if !param_name.ends_with('?') && !grouped_fields.contains(param_name.trim_end_matches('?'))
-        {
-            body.push_str(&format!(
-                "    final_sql = final_sql.replace(r\"#{{{}}}\", &format!(\"${{}}\", param_counter));\n",
-                param_name
-            ));
-            body.push_str("    param_counter += 1;\n");
-        }
-    }
-    let mut renumbered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for block in &parsed_sql.conditional_blocks {
-        for param_name in &block.parameters {
-            let clean_param = param_name.trim_end_matches('?');
-            // A parameter may appear in several mutually-exclusive branches but
-            // only one survives in the final SQL, so number it exactly once.
-            if !renumbered.insert(clean_param.to_string()) {
-                continue;
-            }
-            body.push_str(&format!(
-                "    if included_params.contains(&r\"{}\") {{\n",
-                clean_param
-            ));
-            body.push_str(&format!(
-                "        final_sql = final_sql.replace(r\"#{{{}}}\", &format!(\"${{}}\", param_counter));\n",
-                param_name
-            ));
-            body.push_str("        param_counter += 1;\n");
-            body.push_str("    }\n");
-        }
-    }
-    body.push_str("    let _ = param_counter; // Suppress unused assignment warning\n");
-    body.push_str("\n    let mut query = sqlx::query(&final_sql);\n\n");
-
-    // 4. Bind base (non-conditional) params, then conditional params in order.
-    for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        if param_name.ends_with('?') {
-            continue;
-        }
-        let clean_param = param_name.clone();
-        // Choice-group branch params are bound inside their group's `match`
-        // below, not as base params.
-        if grouped_fields.contains(&clean_param) {
-            continue;
-        }
-        if let Some(ip) = type_of(&clean_param) {
-            if ip.needs_json_wrapper {
-                if ip.is_pg_array() {
-                    body.push_str(&format!("    let {p}_json: Vec<Option<serde_json::Value>> = {p}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", p = clean_param));
-                } else {
-                    body.push_str(&format!("    let {p}_json = serde_json::to_value(&{p}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", p = clean_param));
-                }
-                body.push_str(&format!("    query = query.bind({}_json);\n", clean_param));
-            } else {
-                body.push_str(&format!("    query = query.bind(&{});\n", clean_param));
+                block_owner.insert(bi, (gi, vi));
             }
         }
     }
 
-    let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for block in &parsed_sql.conditional_blocks {
-        for param_name in &block.parameters {
-            let clean_param = param_name.trim_end_matches('?').to_string();
-            // Bind each distinct parameter exactly once (numbered once above).
-            if !bound.insert(clean_param.clone()) {
-                continue;
+    body.push_str("    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(\"\");\n");
+
+    let tokens = tokenize_base_sql(&parsed_sql.base_sql);
+    let mut block_idx = 0usize;
+    for token in &tokens {
+        match token {
+            SqlToken::Lit(s) => {
+                if !s.is_empty() {
+                    body.push_str(&format!("    qb.push({});\n", raw_string_literal(s)));
+                }
             }
-            let is_field = grouped_fields.contains(&clean_param);
-            body.push_str(&format!(
-                "    if included_params.contains(&r\"{}\") {{\n",
-                clean_param
-            ));
-            if let Some(ip) = type_of(&clean_param) {
-                // Grouped branch fields are staged into `_cg` locals inside each
-                // group's `match`; additive params are `Option<T>` args.
-                let value = if is_field {
-                    format!("{}_cg.unwrap()", clean_param)
-                } else {
-                    format!("{}.as_ref().unwrap()", clean_param)
-                };
-                if ip.needs_json_wrapper {
-                    if ip.is_pg_array() {
-                        body.push_str(&format!("        let {p}_json: Vec<Option<serde_json::Value>> = {v}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", p = clean_param, v = value));
+            SqlToken::Param(name) => {
+                // Top-level (base) parameter: always present.
+                let clean = name.trim_end_matches('?');
+                if let Some(ti) = find_input_type(&all_params, type_info, clean) {
+                    emit_push_bind(body, "    ", ti, clean, false, clean);
+                }
+            }
+            SqlToken::Block { .. } => {
+                let i = block_idx;
+                block_idx += 1;
+                let block = &parsed_sql.conditional_blocks[i];
+                // Use the directive-stripped body so the choice-group selector
+                // markers (`#{sort=asc!}`) never appear in the emitted SQL.
+                let inner = tokenize_base_sql(&block.sql_content);
+
+                if let Some(&(gi, vi)) = block_owner.get(&i) {
+                    // Grouped block: emit under an `if let` for its branch.
+                    let group = &query.choice_groups[gi];
+                    let variant = &group.variants[vi];
+                    let enum_name = choice_group_enum_name(&query.name, &group.selector);
+                    let pascal = to_pascal_case(&variant.variant);
+                    let variant_has_fields = !variant.all_params().is_empty();
+                    let pattern = if !variant_has_fields {
+                        format!("{}::{}", enum_name, pascal)
                     } else {
-                        body.push_str(&format!("        let {p}_json = serde_json::to_value({v}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", p = clean_param, v = value));
-                    }
-                    body.push_str(&format!(
-                        "        query = query.bind({}_json);\n",
-                        clean_param
-                    ));
+                        // Destructure the fields referenced in this block (direct
+                        // and nested), ignoring the rest of the variant.
+                        let mut used: Vec<String> = Vec::new();
+                        for p in parse_parameter_names_from_sql(&block.sql_content) {
+                            let c = strip_input_suffix(&p);
+                            if !used.contains(&c) {
+                                used.push(c);
+                            }
+                        }
+                        if used.is_empty() {
+                            format!("{}::{} {{ .. }}", enum_name, pascal)
+                        } else {
+                            format!("{}::{} {{ {}, .. }}", enum_name, pascal, used.join(", "))
+                        }
+                    };
+                    let arm = if group.required {
+                        pattern
+                    } else {
+                        format!("Some({})", pattern)
+                    };
+                    body.push_str(&format!("    if let {} = &{} {{\n", arm, group.selector));
+                    emit_choice_group_block_tokens(body, &inner, "        ", true, &all_params, type_info);
+                    body.push_str("    }\n");
+                } else if block.parameters.is_empty() {
+                    // Additive block with no parameters: always included.
+                    emit_choice_group_block_tokens(body, &inner, "    ", false, &all_params, type_info);
                 } else {
-                    body.push_str(&format!("        query = query.bind({});\n", value));
+                    // Additive block: gated by its first parameter's presence.
+                    let gate = block.parameters[0].trim_end_matches('?');
+                    body.push_str(&format!("    if {}.is_some() {{\n", gate));
+                    emit_choice_group_block_tokens(body, &inner, "        ", false, &all_params, type_info);
+                    body.push_str("    }\n");
                 }
             }
-            body.push_str("    }\n\n");
         }
     }
+
+    body.push_str("    let query = qb.build();\n\n");
 
     generate_query_execution(body, query, type_info, return_type);
     Ok(())
 }
 
 /// Generate function body for conditional (dynamic) SQL queries
+/// A single token of a parsed SQL template (base SQL with `#{param}`
+/// placeholders and `#[...]` conditional blocks preserved).
+enum SqlToken {
+    /// Literal SQL text to emit verbatim.
+    Lit(String),
+    /// A `#{param}` placeholder (name may retain a trailing `?`).
+    Param(String),
+    /// A `#[...]` conditional block with its inner tokens and the list of
+    /// parameter names referenced inside it (in source order).
+    Block {
+        inner: Vec<SqlToken>,
+        params: Vec<String>,
+    },
+}
+
+/// Tokenize a base SQL template into an ordered sequence of literal, parameter
+/// and conditional-block tokens. Preserves all literal characters (including
+/// whitespace) exactly so the reconstructed SQL matches the source.
+fn tokenize_base_sql(sql: &str) -> Vec<SqlToken> {
+    use crate::types_extractor::parse_parameter_names_from_sql;
+
+    let mut tokens = Vec::new();
+    let mut lit = String::new();
+    let mut chars = sql.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '#' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next(); // consume '['
+                    let mut inner = String::new();
+                    let mut depth = 1;
+                    while let Some(c) = chars.next() {
+                        if c == '[' {
+                            depth += 1;
+                            inner.push(c);
+                        } else if c == ']' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            inner.push(c);
+                        } else {
+                            inner.push(c);
+                        }
+                    }
+                    if !lit.is_empty() {
+                        tokens.push(SqlToken::Lit(std::mem::take(&mut lit)));
+                    }
+                    let params = parse_parameter_names_from_sql(&inner);
+                    let inner_tokens = tokenize_base_sql(&inner);
+                    tokens.push(SqlToken::Block {
+                        inner: inner_tokens,
+                        params,
+                    });
+                }
+                Some('{') => {
+                    chars.next(); // consume '{'
+                    let mut name = String::new();
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            break;
+                        }
+                        name.push(c);
+                    }
+                    if !lit.is_empty() {
+                        tokens.push(SqlToken::Lit(std::mem::take(&mut lit)));
+                    }
+                    tokens.push(SqlToken::Param(name));
+                }
+                _ => lit.push(ch),
+            }
+        } else {
+            lit.push(ch);
+        }
+    }
+
+    if !lit.is_empty() {
+        tokens.push(SqlToken::Lit(lit));
+    }
+
+    tokens
+}
+
+/// Produce a Rust raw string literal for `s`, preserving its contents exactly
+/// (no re-indentation), choosing a `#` guard that does not collide with the
+/// text.
+fn raw_string_literal(s: &str) -> String {
+    let mut n = 0;
+    loop {
+        let delim = "#".repeat(n);
+        if !s.contains(&format!("\"{}", delim)) {
+            return format!("r{d}\"{s}\"{d}", d = delim, s = s);
+        }
+        n += 1;
+    }
+}
+
+/// Look up the input-type info for a parameter by its clean (suffix-stripped)
+/// name, indexing positionally against the query's source-order parameters.
+fn find_input_type<'a>(
+    all_params: &[String],
+    type_info: &'a QueryTypeInfo,
+    clean: &str,
+) -> Option<&'a InputParam> {
+    all_params
+        .iter()
+        .position(|p| p.trim_end_matches('?') == clean)
+        .and_then(|idx| type_info.input_types.get(idx))
+}
+
+/// Emit a single `qb.push_bind(...)` for one parameter, applying the JSON
+/// serialization wrapper when the parameter maps to a custom type stored as
+/// jsonb. `owner` is the expression that yields the value (e.g. `name`,
+/// `params.name`, `new.name`, `name.as_ref().unwrap()`); `owner_is_ref` is
+/// true when that expression already yields a reference (so no extra `&` is
+/// added for the plain bind). All bound values flow through `push_bind`, never
+/// string interpolation, so there is no SQL-injection surface.
+fn emit_push_bind(
+    body: &mut String,
+    indent: &str,
+    ti: &InputParam,
+    owner: &str,
+    owner_is_ref: bool,
+    tmp: &str,
+) {
+    if ti.needs_json_wrapper {
+        if ti.is_pg_array() {
+            // For jsonb[] columns: serialize each element individually so that
+            // NULL elements survive as SQL NULL rather than JSON null.
+            body.push_str(&format!(
+                "{i}let {t}_json: Vec<Option<serde_json::Value>> = {o}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n",
+                i = indent, t = tmp, o = owner
+            ));
+            body.push_str(&format!("{i}qb.push_bind({t}_json);\n", i = indent, t = tmp));
+        } else {
+            body.push_str(&format!(
+                "{i}qb.push_bind(serde_json::to_value(&{o}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n",
+                i = indent, o = owner
+            ));
+        }
+    } else {
+        let amp = if owner_is_ref { "" } else { "&" };
+        body.push_str(&format!(
+            "{i}qb.push_bind({a}{o});\n",
+            i = indent,
+            a = amp,
+            o = owner
+        ));
+    }
+}
+
 fn generate_conditional_function_body(
     body: &mut String,
     query: &QueryDefinition,
@@ -1830,243 +1564,100 @@ fn generate_conditional_function_body(
 
     let use_conditional_diff = query.conditions_type.is_enabled();
     let use_structured_params = query.parameters_type.is_enabled() && !use_conditional_diff;
-    // Parse all parameters from the original SQL to get their order and types
+    // Parse all parameters from the original SQL to get their order and types.
     let all_params = parse_parameter_names_from_sql(&query.sql);
 
-    // Track parameter count for proper numbering across all parts
-    let mut current_param_num = 1usize;
+    // Tokenize the base SQL (with `#{param}` placeholders and `#[...]` blocks
+    // preserved) and emit a sqlx::QueryBuilder. `push_bind` assigns `$N`
+    // placeholders automatically in push order, so no manual renumbering or
+    // inclusion tracking is required.
+    let tokens = tokenize_base_sql(&parsed_sql.base_sql);
 
-    // Start with the base SQL template that has placeholders for conditional blocks
-    let mut sql_template = parsed_sql.base_sql.clone();
+    body.push_str("    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(\"\");\n");
 
-    // Replace non-conditional parameters in the template with numbered placeholders
-    for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        if !param_name.ends_with('?') {
-            // Only replace non-conditional parameters
-            sql_template = sql_template.replace(
-                &format!("#{{{}}}", param_name),
-                &format!("${}", current_param_num),
-            );
-            current_param_num += 1;
-        }
-    }
-
-    // Create conditional block info (without fixed parameter numbers)
-    // Each block keeps the full list of its parameters so that blocks containing
-    // more than one parameter (e.g. `#[AND (a, b) > (#{x?}, #{y?})]`) are fully
-    // renumbered and bound rather than only their first parameter.
-    let mut conditional_replacements = Vec::new();
-    for (i, block) in parsed_sql.conditional_blocks.iter().enumerate() {
-        if !block.parameters.is_empty() {
-            let block_sql = block.sql_content.clone(); // Keep original parameter syntax for now
-            conditional_replacements.push((i, block_sql, block.parameters.clone()));
-        }
-    }
-
-    // Generate the SQL building code with complete parameter renumbering
-    body.push_str("    let mut final_sql = r\"");
-    body.push_str(&sql_template);
-    body.push_str("\".to_string();\n");
-    body.push_str("    let mut included_params = Vec::new();\n\n");
-
-    // Replace each conditional block based on parameter presence or diff
-    for (_, block_sql, block_params) in &conditional_replacements {
-        // The whole block is included/excluded based on its first parameter.
-        // All parameters of the block are then included together.
-        let gate_param = &block_params[0];
-        let clean_gate = gate_param.trim_end_matches('?');
-
-        let conditional_block = format!("#[{}]", block_sql);
-
-        if use_conditional_diff {
-            // For conditions_type, check if old and new values differ
-            body.push_str(&format!(
-                "    if old.{} != new.{} {{\n",
-                clean_gate, clean_gate
-            ));
-        } else if use_structured_params {
-            // For parameters_type, check if parameter is Some (for Option types)
-            body.push_str(&format!("    if params.{}.is_some() {{\n", clean_gate));
-        } else {
-            // For regular conditional, check if parameter is Some
-            body.push_str(&format!("    if {}.is_some() {{\n", clean_gate));
-        }
-
-        body.push_str(&format!(
-            "        final_sql = final_sql.replace(r\"{}\", r\"{}\");\n",
-            conditional_block,
-            &conditional_block[2..conditional_block.len() - 1]
-        ));
-        for param_name in block_params {
-            let clean_param = param_name.trim_end_matches('?');
-            body.push_str(&format!(
-                "        included_params.push(\"{}\");\n",
-                clean_param
-            ));
-        }
-        body.push_str("    } else {\n");
-        body.push_str(&format!(
-            "        final_sql = final_sql.replace(r\"{}\", \"\");\n",
-            conditional_block
-        ));
-        body.push_str("    }\n\n");
-    }
-
-    body.push_str("    #[allow(unused_assignments)]\n");
-    body.push_str("    let mut param_counter = 1;\n");
-
-    // Renumber base (non-conditional) parameters first
-    for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        if !param_name.ends_with('?') {
-            body.push_str(&format!(
-                "    final_sql = final_sql.replace(r\"#{{{}}}\", &format!(\"${{}}\", param_counter));\n",
-                param_name
-            ));
-            body.push_str("    param_counter += 1;\n");
-        }
-    }
-
-    // Renumber conditional parameters that are included
-    for (_, _, block_params) in &conditional_replacements {
-        for param_name in block_params {
-            let clean_param = param_name.trim_end_matches('?');
-
-            body.push_str(&format!(
-                "    if included_params.contains(&r\"{}\") {{\n",
-                clean_param
-            ));
-            body.push_str(&format!(
-                "        final_sql = final_sql.replace(r\"#{{{}}}\", &format!(\"${{}}\", param_counter));\n",
-                param_name
-            ));
-            body.push_str("        param_counter += 1;\n");
-            body.push_str("    }\n");
-        }
-    }
-
-    // Ensure param_counter is marked as used to avoid unused assignment warnings
-    body.push_str("    let _ = param_counter; // Suppress unused assignment warning\n");
-    body.push_str("\n    let mut query = sqlx::query(&final_sql);\n\n");
-
-    // Bind parameters in the order they will appear in the final SQL
-    // First, bind base (non-conditional) parameters
-    for param_name in parse_parameter_names_from_sql(&parsed_sql.base_sql) {
-        if !param_name.ends_with('?') {
-            // Only bind non-conditional parameters
-            let clean_param = param_name.clone();
-
-            if let Some(param_index) = all_params.iter().position(|p| {
-                let clean_p = if p.ends_with('?') {
-                    p.trim_end_matches('?')
+    for token in &tokens {
+        match token {
+            SqlToken::Lit(s) => {
+                if !s.is_empty() {
+                    body.push_str(&format!("    qb.push({});\n", raw_string_literal(s)));
+                }
+            }
+            SqlToken::Param(name) => {
+                // Base (non-conditional) parameter: always present.
+                let clean = name.trim_end_matches('?');
+                let owner = if use_structured_params {
+                    format!("params.{}", clean)
                 } else {
-                    p
+                    clean.to_string()
                 };
-                clean_p == clean_param
-            }) {
-                if let Some(rust_type_info) = type_info.input_types.get(param_index) {
-                    if rust_type_info.needs_json_wrapper {
-                        if rust_type_info.is_pg_array() {
-                            // For jsonb[] columns: serialize each element individually
-                            if use_structured_params {
-                                body.push_str(&format!("    let {}_json: Vec<Option<serde_json::Value>> = params.{}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
-                            } else {
-                                body.push_str(&format!("    let {}_json: Vec<Option<serde_json::Value>> = {}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
+                if let Some(ti) = find_input_type(&all_params, type_info, clean) {
+                    emit_push_bind(body, "    ", ti, &owner, false, clean);
+                }
+            }
+            SqlToken::Block { inner, params } => {
+                if params.is_empty() {
+                    // No parameters gate this block; always include it.
+                    for t in inner {
+                        if let SqlToken::Lit(s) = t {
+                            if !s.is_empty() {
+                                body.push_str(&format!(
+                                    "    qb.push({});\n",
+                                    raw_string_literal(s)
+                                ));
                             }
-                        } else {
-                            if use_structured_params {
-                                body.push_str(&format!("    let {}_json = serde_json::to_value(&params.{}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
-                            } else {
-                                body.push_str(&format!("    let {}_json = serde_json::to_value(&{}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
-                            }
-                        }
-                        body.push_str(&format!("    query = query.bind({}_json);\n", clean_param));
-                    } else {
-                        if use_structured_params {
-                            body.push_str(&format!(
-                                "    query = query.bind(&params.{});\n",
-                                clean_param
-                            ));
-                        } else {
-                            body.push_str(&format!("    query = query.bind(&{});\n", clean_param));
                         }
                     }
+                    continue;
                 }
+
+                // The whole block is included/excluded based on its first
+                // parameter; all of its parameters are then bound together.
+                let gate = params[0].trim_end_matches('?');
+                let condition = if use_conditional_diff {
+                    format!("old.{g} != new.{g}", g = gate)
+                } else if use_structured_params {
+                    format!("params.{}.is_some()", gate)
+                } else {
+                    format!("{}.is_some()", gate)
+                };
+                body.push_str(&format!("    if {} {{\n", condition));
+
+                for t in inner {
+                    match t {
+                        SqlToken::Lit(s) => {
+                            if !s.is_empty() {
+                                body.push_str(&format!(
+                                    "        qb.push({});\n",
+                                    raw_string_literal(s)
+                                ));
+                            }
+                        }
+                        SqlToken::Param(name) => {
+                            let clean = name.trim_end_matches('?');
+                            let (owner, owner_is_ref) = if use_conditional_diff {
+                                (format!("new.{}", clean), false)
+                            } else if use_structured_params {
+                                (format!("params.{}.as_ref().unwrap()", clean), true)
+                            } else {
+                                (format!("{}.as_ref().unwrap()", clean), true)
+                            };
+                            if let Some(ti) = find_input_type(&all_params, type_info, clean) {
+                                emit_push_bind(body, "        ", ti, &owner, owner_is_ref, clean);
+                            }
+                        }
+                        // Nested conditional blocks are not produced for plain
+                        // conditional queries (only the mixed choice path uses
+                        // nesting), so there is nothing to emit here.
+                        SqlToken::Block { .. } => {}
+                    }
+                }
+
+                body.push_str("    }\n");
             }
         }
     }
 
-    // Then, bind conditional parameters only if they are included
-    for (_, _, block_params) in &conditional_replacements {
-        for param_name in block_params {
-            let clean_param = param_name.trim_end_matches('?');
-
-            body.push_str(&format!(
-                "    if included_params.contains(&r\"{}\") {{\n",
-                clean_param
-            ));
-
-            if let Some(param_index) = all_params.iter().position(|p| {
-                let clean_p = if p.ends_with('?') {
-                    p.trim_end_matches('?')
-                } else {
-                    p
-                };
-                clean_p == clean_param
-            }) {
-                if let Some(rust_type_info) = type_info.input_types.get(param_index) {
-                    if rust_type_info.needs_json_wrapper {
-                        if rust_type_info.is_pg_array() {
-                            // For jsonb[] columns: serialize each element individually
-                            if use_conditional_diff {
-                                body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = new.{}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
-                            } else if use_structured_params {
-                                body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = params.{}.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
-                            } else {
-                                body.push_str(&format!("        let {}_json: Vec<Option<serde_json::Value>> = {}.as_ref().unwrap().iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n", clean_param, clean_param));
-                            }
-                        } else {
-                            if use_conditional_diff {
-                                // For conditions_type, use new.field directly
-                                body.push_str(&format!("        let {}_json = serde_json::to_value(&new.{}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
-                            } else if use_structured_params {
-                                // For parameters_type, unwrap from params struct
-                                body.push_str(&format!("        let {}_json = serde_json::to_value(&params.{}.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
-                            } else {
-                                // For regular conditional, unwrap the Option
-                                body.push_str(&format!("        let {}_json = serde_json::to_value(&{}.as_ref().unwrap()).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;\n", clean_param, clean_param));
-                            }
-                        }
-                        body.push_str(&format!(
-                            "        query = query.bind({}_json);\n",
-                            clean_param
-                        ));
-                    } else {
-                        if use_conditional_diff {
-                            // For conditions_type, bind new.field directly
-                            body.push_str(&format!(
-                                "        query = query.bind(&new.{});\n",
-                                clean_param
-                            ));
-                        } else if use_structured_params {
-                            // For parameters_type, unwrap from params struct
-                            body.push_str(&format!(
-                                "        query = query.bind(params.{}.as_ref().unwrap());\n",
-                                clean_param
-                            ));
-                        } else {
-                            // For regular conditional, unwrap the Option
-                            body.push_str(&format!(
-                                "        query = query.bind({}.as_ref().unwrap());\n",
-                                clean_param
-                            ));
-                        }
-                    }
-                }
-            }
-
-            body.push_str("    }\n\n");
-        }
-    }
+    body.push_str("    let query = qb.build();\n\n");
 
     generate_query_execution(body, query, type_info, return_type);
     Ok(())
