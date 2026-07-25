@@ -3,114 +3,6 @@ use std::collections::{HashMap, HashSet};
 use tokio_postgres::types::{Kind as PgKind, Type as PgType};
 use tokio_postgres::Statement;
 
-/// Strip non-null column cast syntax from SQL and return cleaned SQL + set of forced-non-null column names.
-///
-/// Two syntaxes are supported:
-///
-/// 1. **Native syntax** — `AS {col_name!}`:
-///    Rewritten to `AS col_name` in both build-time and runtime SQL.
-///
-/// 2. **sqlx compatibility syntax** — `AS "col_name!"`:
-///    Rewritten to `AS col_name` in both build-time and runtime SQL.
-///    This provides easy migration from sqlx's non-null override convention.
-///
-/// In both cases the column name is collected into the returned set.
-pub fn strip_non_null_column_casts(sql: &str) -> (String, HashSet<String>) {
-    let mut result = String::with_capacity(sql.len());
-    let mut non_null_columns: HashSet<String> = HashSet::new();
-    let bytes = sql.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        // Syntax 1: {identifier!}  (but NOT #{...} which is for input parameters)
-        if bytes[i] == b'{' {
-            // Check this is not a #{...} parameter (preceded by #)
-            if i > 0 && bytes[i - 1] == b'#' {
-                result.push(bytes[i] as char);
-                i += 1;
-                continue;
-            }
-
-            // Try to parse {name!}
-            let start = i;
-            i += 1; // skip '{'
-            let mut name = String::new();
-            let mut found_bang = false;
-            let mut found_close = false;
-
-            while i < len {
-                if bytes[i] == b'!' {
-                    found_bang = true;
-                    i += 1;
-                } else if bytes[i] == b'}' {
-                    found_close = true;
-                    i += 1;
-                    break;
-                } else if found_bang {
-                    // Characters after ! but before } — not our syntax
-                    break;
-                } else if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
-                    name.push(bytes[i] as char);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-
-            if found_bang && found_close && !name.is_empty() {
-                // Valid {name!} syntax — emit plain column name
-                non_null_columns.insert(name.clone());
-                result.push_str(&name);
-            } else {
-                // Not our syntax, emit the original characters
-                result.push_str(&sql[start..i]);
-            }
-            continue;
-        }
-
-        // Syntax 2: "identifier!" — sqlx compatibility
-        // Only match quoted identifiers where the last character before the closing quote is '!'
-        if bytes[i] == b'"' {
-            let start = i;
-            i += 1; // skip opening '"'
-            let mut name = String::new();
-            let mut found_close = false;
-
-            while i < len {
-                if bytes[i] == b'"' {
-                    found_close = true;
-                    i += 1;
-                    break;
-                } else {
-                    name.push(bytes[i] as char);
-                    i += 1;
-                }
-            }
-
-            if found_close && name.ends_with('!') {
-                // Valid "name!" syntax — strip the '!' and emit plain column name
-                let clean_name = &name[..name.len() - 1];
-                if !clean_name.is_empty() {
-                    non_null_columns.insert(clean_name.to_string());
-                    result.push_str(clean_name);
-                    continue;
-                }
-            }
-
-            // Not our syntax or empty — emit original characters
-            result.push_str(&sql[start..i]);
-            continue;
-        }
-
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-
-    (result, non_null_columns)
-}
-
-use crate::query_definition::ChoiceGroup;
 use crate::rust_type::{InputParam, OutputColumn, RustName, StructField};
 use crate::utils::to_snake_case;
 
@@ -133,37 +25,19 @@ pub struct QueryTypeInfo {
     pub input_types: Vec<InputParam>,
     /// Output column types and names
     pub output_types: Vec<OutputColumn>,
-    /// Parsed SQL with conditional blocks (if any)
-    pub parsed_sql: Option<ParsedSql>,
-    /// The prepared statement(s), retained for building the TypeSystem.
+    /// The prepared statements whose parameter and column types are harvested to
+    /// build the `TypeSystem` — one per EXPLAIN variant derived from the query's
+    /// `SqlTree` (see `SqlTree::explain_variants`).
     ///
-    /// Normally this is a single statement prepared from the fully-combined SQL
-    /// (all conditional blocks included at once). When the combined SQL cannot be
-    /// prepared because some conditional blocks are mutually exclusive (e.g.
-    /// alternative `ORDER BY ... LIMIT` branches), it instead holds one statement
-    /// per successfully prepared query variant so every parameter and output
-    /// column type is still captured.
+    /// Which variants are valid is determined structurally from the tree, not by
+    /// trial-and-error on prepare failures: every additive `#[...]` block is
+    /// always included (independent optional clauses compose into a single
+    /// preparable query), while the branches of each mutually-exclusive choice
+    /// group are enumerated one group at a time (the others held at their first
+    /// branch). A query with no choice groups therefore yields a single
+    /// statement; one with choice groups yields one statement per branch, so
+    /// every parameter and output column across all branches is still captured.
     pub statements: Vec<Statement>,
-}
-
-/// Represents a conditional block in a SQL query
-#[derive(Debug, Clone)]
-pub struct ConditionalBlock {
-    /// The SQL content inside the conditional block
-    pub sql_content: String,
-    /// Parameters referenced within this conditional block
-    pub parameters: Vec<String>,
-}
-
-/// Parsed SQL with conditional blocks separated
-#[derive(Debug, Clone)]
-pub struct ParsedSql {
-    /// Base SQL with conditional blocks removed and placeholders inserted
-    pub base_sql: String,
-    /// List of conditional blocks found in the SQL
-    pub conditional_blocks: Vec<ConditionalBlock>,
-    /// All parameter names found in the SQL (including those in conditional blocks)
-    pub all_parameters: Vec<String>,
 }
 
 /// Extract type information from a prepared SQL statement.
@@ -181,18 +55,15 @@ pub async fn extract_query_types(
     sql: &str,
     explain_variants: &[(String, Vec<String>, String)],
     field_type_mappings: Option<&HashMap<String, String>>,
+    non_null_columns: &HashSet<String>,
 ) -> Result<QueryTypeInfo> {
-    // Strip non-null column cast syntax: {col!} and "col!" → clean col names.
-    // The non_null_columns set is used later to override nullability on output columns.
-    let (clean_sql, non_null_columns) = strip_non_null_column_casts(sql);
-
-    // Parse SQL to handle conditional blocks (needed by codegen via `parsed_sql`).
-    let parsed_sql = parse_sql_with_conditionals(&clean_sql);
-    let has_conditionals = !parsed_sql.conditional_blocks.is_empty();
+    // `sql` is already cast-free (rendered from the canonical tree). The set of
+    // forced-non-null output columns is supplied by the caller (also derived
+    // from the tree) rather than recomputed here via a separate strip pass.
 
     // Canonical source order of every parameter (suffixes preserved). Downstream
     // codegen expects `input_types` to line up with this ordering.
-    let ordered_param_names = parse_parameter_names_from_sql(&clean_sql);
+    let ordered_param_names = parse_parameter_names_from_sql(sql);
 
     let mut param_types: HashMap<String, InputParam> = HashMap::new();
     let mut output_types: Vec<OutputColumn> = Vec::new();
@@ -216,7 +87,7 @@ pub async fn extract_query_types(
 
         if !have_output {
             let outputs =
-                extract_output_types(client, &statement, field_type_mappings, &non_null_columns)
+                extract_output_types(client, &statement, field_type_mappings, non_null_columns)
                     .await?;
             if !outputs.is_empty() {
                 output_types = outputs;
@@ -244,197 +115,8 @@ pub async fn extract_query_types(
     Ok(QueryTypeInfo {
         input_types,
         output_types,
-        parsed_sql: if has_conditionals {
-            Some(parsed_sql)
-        } else {
-            None
-        },
         statements,
     })
-}
-
-/// Generate the set of *valid* query variants used for EXPLAIN validation and
-/// type extraction.
-///
-/// Every additive (ungrouped) conditional block is always included; for each
-/// choice group exactly one branch is chosen, varying a single group at a time
-/// while holding every other group at its first branch. This keeps the number of
-/// variants linear while still exercising every grouped parameter at least once.
-/// For a query with no choice groups this yields a single variant with all
-/// conditional blocks combined. Each entry is
-/// `(positional_sql, ordered_param_names, label)`.
-pub(crate) fn generate_explain_variants(
-    sql: &str,
-    choice_groups: &[ChoiceGroup],
-) -> Vec<(String, Vec<String>, String)> {
-    // Match how `sql_variants` are built at parse time: strip non-null casts,
-    // then convert to positional parameters (done per-selection below).
-    let (clean_sql, _) = strip_non_null_column_casts(sql);
-    let parsed_sql = parse_sql_with_conditionals(&clean_sql);
-    let block_count = parsed_sql.conditional_blocks.len();
-
-    // Block indices owned by some choice group; every other block is additive.
-    let grouped_indices: HashSet<usize> = choice_groups
-        .iter()
-        .flat_map(|g| {
-            g.variants
-                .iter()
-                .flat_map(|v| v.block_indices.iter().copied())
-        })
-        .collect();
-    let additive: Vec<usize> = (0..block_count)
-        .filter(|i| !grouped_indices.contains(i))
-        .collect();
-
-    // Default branch per group = its first variant's block set.
-    let default_choice: Vec<Vec<usize>> = choice_groups
-        .iter()
-        .map(|g| {
-            g.variants
-                .first()
-                .map(|v| v.block_indices.clone())
-                .unwrap_or_default()
-        })
-        .collect();
-
-    // One selection per (group, variant): vary that group's branch while holding
-    // all others at their default branch. Deduplicate identical selections.
-    let mut selections: Vec<Vec<usize>> = Vec::new();
-    let mut seen: HashSet<Vec<usize>> = HashSet::new();
-    for (gi, group) in choice_groups.iter().enumerate() {
-        for variant in &group.variants {
-            let mut chosen = default_choice.clone();
-            if let Some(slot) = chosen.get_mut(gi) {
-                *slot = variant.block_indices.clone();
-            }
-            let mut included: Vec<usize> = additive.clone();
-            for blocks in &chosen {
-                included.extend(blocks.iter().copied());
-            }
-            included.sort_unstable();
-            included.dedup();
-            if seen.insert(included.clone()) {
-                selections.push(included);
-            }
-        }
-    }
-    // No choice groups (or none with variants): a single all-additive selection.
-    if selections.is_empty() {
-        let mut included = additive.clone();
-        included.sort_unstable();
-        selections.push(included);
-    }
-
-    selections
-        .into_iter()
-        .enumerate()
-        .map(|(i, included)| {
-            let set: HashSet<usize> = included.into_iter().collect();
-            let (converted, names) = build_selected_sql(&parsed_sql, &set);
-            let label = if i == 0 {
-                "base".to_string()
-            } else {
-                format!("variant {}", i)
-            };
-            (converted, names, label)
-        })
-        .collect()
-}
-
-/// Build a positional SQL string that includes only the given conditional block
-/// indices (each such block's `#[...]` marker replaced by its inner content) and
-/// removes all others, then converts remaining `#{param}` placeholders to `$N`.
-/// Returns the positional SQL and the ordered parameter names (with suffixes).
-fn build_selected_sql(parsed_sql: &ParsedSql, included: &HashSet<usize>) -> (String, Vec<String>) {
-    // Resolve top-level blocks positionally (by source order) rather than by
-    // body text: two blocks sharing an identical body (e.g. two `NULL`
-    // off-branches in different choice groups) must be included/excluded
-    // independently, which a `String::replace` keyed on `#[NULL]` cannot do.
-    let sql = select_top_level_blocks(&parsed_sql.base_sql, included);
-    // Any `#[...]` markers still present are nested optional blocks (Option B)
-    // inside an included choice-group branch. For EXPLAIN validation and type
-    // extraction we want the fully included ("with cursor") form, so inline them
-    // (keep their content, drop the markers). Nested blocks inside an excluded
-    // branch were already removed with their parent above.
-    let sql = inline_nested_markers(&sql);
-    convert_named_params_to_positional(&sql)
-}
-
-/// Walk `sql` and resolve each top-level `#[...]` conditional block by its
-/// source-order index: included blocks contribute their raw inner content (which
-/// may still contain nested `#[...]` markers), excluded blocks contribute
-/// nothing. Bracket nesting is honored exactly as in `parse_sql_with_conditionals`
-/// so the emitted indices line up 1:1 with `ParsedSql::conditional_blocks`.
-fn select_top_level_blocks(sql: &str, included: &HashSet<usize>) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut chars = sql.chars().peekable();
-    let mut idx = 0usize;
-    while let Some(ch) = chars.next() {
-        if ch == '#' {
-            if let Some(&'[') = chars.peek() {
-                chars.next(); // consume '['
-                let mut depth = 1usize;
-                let mut content = String::new();
-                while let Some(inner) = chars.next() {
-                    if inner == '[' {
-                        depth += 1;
-                        content.push(inner);
-                    } else if inner == ']' {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                        content.push(inner);
-                    } else {
-                        content.push(inner);
-                    }
-                }
-                if included.contains(&idx) {
-                    out.push_str(&content);
-                }
-                idx += 1;
-                continue;
-            }
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// Remove every `#[` / matching `]` marker pair, keeping the inner content, so a
-/// SQL string containing nested optional-block markers becomes valid SQL with
-/// those blocks inlined (fully included).
-fn inline_nested_markers(sql: &str) -> String {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut result = String::with_capacity(sql.len());
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            let mut depth = 1;
-            let mut j = i + 2;
-            while j < chars.len() && depth > 0 {
-                match chars[j] {
-                    '[' => {
-                        depth += 1;
-                        result.push('[');
-                    }
-                    ']' => {
-                        depth -= 1;
-                        if depth > 0 {
-                            result.push(']');
-                        }
-                    }
-                    c => result.push(c),
-                }
-                j += 1;
-            }
-            i = j;
-        } else {
-            result.push(chars[i]);
-            i += 1;
-        }
-    }
-    result
 }
 
 /// Extract constraint information from tables involved in a prepared statement
@@ -1051,130 +733,6 @@ pub fn parse_parameter_names_from_sql(sql: &str) -> Vec<String> {
     }
 
     param_names
-}
-
-/// Parse SQL to extract conditional blocks and return structured information
-pub fn parse_sql_with_conditionals(sql: &str) -> ParsedSql {
-    let mut result = ParsedSql {
-        base_sql: String::new(),
-        conditional_blocks: Vec::new(),
-        all_parameters: Vec::new(),
-    };
-
-    let mut chars = sql.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '#' {
-            if let Some(&'[') = chars.peek() {
-                // Found start of conditional block
-                chars.next(); // consume '['
-
-                let mut block_content = String::new();
-                let mut bracket_count = 1; // We already consumed one '['
-
-                // Read until we find the matching ']'
-                while let Some(inner_ch) = chars.next() {
-                    if inner_ch == '[' {
-                        bracket_count += 1;
-                        block_content.push(inner_ch);
-                    } else if inner_ch == ']' {
-                        bracket_count -= 1;
-                        if bracket_count == 0 {
-                            // Found the end of this conditional block
-
-                            // Extract parameters from this block
-                            let block_params = parse_parameter_names_from_sql(&block_content);
-
-                            // Add conditional block
-                            result.conditional_blocks.push(ConditionalBlock {
-                                sql_content: block_content.clone(),
-                                parameters: block_params.clone(),
-                            });
-
-                            // Add parameters to our global list
-                            result.all_parameters.extend(block_params);
-
-                            // Keep the original conditional block syntax in base SQL
-                            result.base_sql.push_str(&format!("#[{}]", block_content));
-                            break;
-                        } else {
-                            block_content.push(inner_ch);
-                        }
-                    } else {
-                        block_content.push(inner_ch);
-                    }
-                }
-            } else if let Some(&'{') = chars.peek() {
-                // Found regular parameter #{param}
-                chars.next(); // consume '{'
-                let mut param_name = String::new();
-
-                while let Some(inner_ch) = chars.next() {
-                    if inner_ch == '}' {
-                        if !param_name.is_empty() {
-                            result.all_parameters.push(param_name.clone());
-                            result.base_sql.push_str("#{");
-                            result.base_sql.push_str(&param_name);
-                            result.base_sql.push('}');
-                        }
-                        break;
-                    } else {
-                        param_name.push(inner_ch);
-                    }
-                }
-            } else {
-                // Regular # character
-                result.base_sql.push(ch);
-            }
-        } else {
-            result.base_sql.push(ch);
-        }
-    }
-
-    result
-}
-
-/// Convert SQL with named parameters ${param} to positional parameters $1, $2, etc.
-pub fn convert_named_params_to_positional(sql: &str) -> (String, Vec<String>) {
-    let mut param_names = Vec::new();
-    let mut result_sql = String::new();
-    let mut chars = sql.chars().peekable();
-    let mut param_counter = 1;
-
-    while let Some(ch) = chars.next() {
-        if ch == '#' {
-            if let Some(&'{') = chars.peek() {
-                chars.next(); // consume the '{'
-                let mut param_name = String::new();
-
-                // Read until we find the closing brace
-                while let Some(inner_ch) = chars.next() {
-                    if inner_ch == '}' {
-                        if !param_name.is_empty() {
-                            param_names.push(param_name);
-                            result_sql.push_str(&format!("${}", param_counter));
-                            param_counter += 1;
-                        }
-                        break;
-                    } else {
-                        param_name.push(inner_ch);
-                    }
-                }
-            } else {
-                // Regular $ character, just pass it through
-                result_sql.push(ch);
-            }
-        } else {
-            result_sql.push(ch);
-        }
-    }
-
-    // If no named parameters were found, return original SQL
-    if param_names.is_empty() {
-        (sql.to_string(), Vec::new())
-    } else {
-        (result_sql, param_names)
-    }
 }
 
 /// Create dummy parameter values for EXPLAIN queries

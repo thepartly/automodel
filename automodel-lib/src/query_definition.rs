@@ -110,25 +110,6 @@ impl Default for ExpectedResult {
 pub(crate) struct QueryDefinition {
     /// The name of the query, which will be used as the function name
     pub name: String,
-    /// The SQL query string (original with #{param} syntax)
-    pub sql: String,
-    /// Pre-processed SQL variants with positional parameters ($1, $2, etc.)
-    /// Each variant represents: (converted_sql, param_names, variant_label)
-    /// - Base variant has all conditional blocks removed
-    /// - Additional variants include each conditional block separately
-    ///
-    /// These preserve the positional contract used by codegen: index 0 is the
-    /// base variant and index `block_index + 1` is that single block in
-    /// isolation. They are NOT used for EXPLAIN or type extraction (see
-    /// `explain_variants`).
-    pub sql_variants: Vec<(String, Vec<String>, String)>,
-    /// Pre-processed *valid* SQL variants used for EXPLAIN validation and type
-    /// extraction. Each variant always includes every ungrouped (additive)
-    /// conditional block and exactly one branch from each choice group (varying a
-    /// single group at a time). For a query with no choice groups this is a single
-    /// variant with all conditional blocks combined. Each entry is
-    /// (converted_sql, param_names, variant_label).
-    pub explain_variants: Vec<(String, Vec<String>, String)>,
     /// Optional description of what the query does
     pub description: Option<String>,
     /// Module name where this function should be generated
@@ -186,74 +167,12 @@ pub(crate) struct QueryDefinition {
     /// e.g., ["serde::Serialize", "serde::Deserialize"]
     /// Empty vec means no additional derives
     pub error_type_derives: Vec<String>,
-    /// Mutually-exclusive choice groups declared via `#{selector=variant!}` /
-    /// `#{selector=variant?}` directives on conditional blocks. Empty when the
-    /// query uses no choice groups.
-    pub choice_groups: Vec<ChoiceGroup>,
-}
-
-/// A single branch within a mutually-exclusive choice group.
-///
-/// Each branch corresponds to one conditional `#[...]` block that was tagged
-/// with a selector directive `#{selector=variant!}` / `#{selector=variant?}`.
-#[derive(Debug, Clone)]
-pub(crate) struct ChoiceVariant {
-    /// Variant name from the selector directive (e.g. "ua_asc").
-    pub variant: String,
-    /// Indices, in source order, of the conditional block(s) that make up this
-    /// branch. Most branches map to a single block, but a branch may span
-    /// several blocks when the same `#{selector=variant}` directive is repeated
-    /// (e.g. a projection fragment plus a matching `LEFT JOIN` fragment that
-    /// must switch together).
-    pub block_indices: Vec<usize>,
-    /// Clean parameter names (suffixes stripped) referenced *directly* in this
-    /// branch (outside any nested optional block), in source order, excluding the
-    /// selector directive itself. These become mandatory (non-`Option`) enum
-    /// variant fields.
-    pub params: Vec<String>,
-    /// Nested optional `#[...]` blocks declared inside this branch (Option B).
-    /// Each nested block is included at runtime only when its gate parameter is
-    /// `Some`, so its parameters become `Option<T>` enum variant fields. Empty
-    /// for ordinary branches.
-    pub nested_blocks: Vec<NestedChoiceBlock>,
-}
-
-impl ChoiceVariant {
-    /// All clean parameter names referenced anywhere in this branch (direct
-    /// fields first, then nested-block fields), in source order.
-    pub fn all_params(&self) -> Vec<String> {
-        let mut out = self.params.clone();
-        for nb in &self.nested_blocks {
-            out.extend(nb.params.iter().cloned());
-        }
-        out
-    }
-}
-
-/// A nested optional conditional block declared inside a choice-group branch
-/// (Option B keyset-pagination pattern). At runtime it is included only when its
-/// gate parameter (`params[0]`) is `Some`, mirroring ordinary additive `#[...]`
-/// blocks; its parameters therefore surface as `Option<T>` fields on the branch.
-#[derive(Debug, Clone)]
-pub(crate) struct NestedChoiceBlock {
-    /// Clean parameter names (suffixes stripped) referenced in this nested block,
-    /// in source order. `params[0]` is the include gate.
-    pub params: Vec<String>,
-}
-
-/// A mutually-exclusive choice group: exactly one branch (`!`, required) or at
-/// most one branch (`?`, optional) is selected at runtime via a generated enum
-/// argument. Declared in SQL by prefixing each alternative conditional block
-/// with `#{selector=variant!}` (or `?`).
-#[derive(Debug, Clone)]
-pub(crate) struct ChoiceGroup {
-    /// Selector name (e.g. "sort") — becomes the generated enum argument name.
-    pub selector: String,
-    /// `true` if a branch must be chosen (`!` marker) → `selector: Enum`.
-    /// `false` if the group is optional (`?` marker) → `selector: Option<Enum>`.
-    pub required: bool,
-    /// Branches in source order.
-    pub variants: Vec<ChoiceVariant>,
+    /// Canonical token-tree of the query's SQL (comment-free; casts and selector
+    /// directives decoded into `Cast` nodes and block gates). The single
+    /// structured source of truth from which the SQL template, parameter names,
+    /// EXPLAIN/query variants, non-null columns and choice groups are all
+    /// rendered on demand.
+    pub tree: crate::sql_tree::SqlTree,
 }
 
 /// Per-query telemetry configuration

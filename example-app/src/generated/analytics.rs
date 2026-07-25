@@ -570,7 +570,7 @@ pub async fn get_user_count_and_avg_age(executor: impl sqlx::Executor<'_, Databa
 /// Aggregate
 ///   ->  Bitmap Heap Scan on users
 ///         ->  Bitmap Index Scan on idx_users_age
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT count(*) + count(*) AS {total!} FROM public.users"))]
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT count(*) + count(*) AS total FROM public.users"))]
 pub async fn get_non_null_count_expression(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<i64, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT count(*) + count(*) AS total FROM public.users"
@@ -594,7 +594,7 @@ pub struct GetNonNullMultiFieldsItem {
 /// Aggregate
 ///   ->  Bitmap Heap Scan on users
 ///         ->  Bitmap Index Scan on idx_users_age
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n    count(*) AS {user_count!},\n    count(*) + count(*) AS {double_count!},\n    true AS {is_valid!},\n    now() AS \"current_time!\",\n    'hello' AS {greeting!}\nFROM public.users"))]
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n    count(*) AS user_count,\n    count(*) + count(*) AS double_count,\n    true AS is_valid,\n    now() AS current_time,\n    'hello' AS greeting\nFROM public.users"))]
 pub async fn get_non_null_multi_fields(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<GetNonNullMultiFieldsItem, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT
@@ -633,7 +633,7 @@ pub struct GetNonNullMultiRowsItem {
 /// JIT:
 ///   Functions: 2
 ///   Options: Inlining true, Optimization true, Expressions true, Deforming true
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n    id AS {user_id!},\n    name AS {user_name!},\n    created_at > now() - interval '1 year' AS {is_recent!},\n    true AS \"is_active!\"\nFROM public.users"))]
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT\n    id AS user_id,\n    name AS user_name,\n    created_at > now() - interval '1 year' AS is_recent,\n    true AS is_active\nFROM public.users"))]
 pub async fn get_non_null_multi_rows(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<Vec<GetNonNullMultiRowsItem>, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT

@@ -1144,7 +1144,7 @@ pub async fn get_user_by_id_and_email(executor: impl sqlx::Executor<'_, Database
 }
 
 /// Test non-null override with native {col!} syntax on boolean literal in RETURNING
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET name = #{name}\nWHERE id = #{id}\nRETURNING true AS {applied!}"))]
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "UPDATE public.users\nSET name = #{name}\nWHERE id = #{id}\nRETURNING true AS applied"))]
 pub async fn update_user_returning_applied(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, name: String, id: i32) -> Result<Option<bool>, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"UPDATE public.users
@@ -1230,7 +1230,7 @@ pub async fn delete_user_by_id_and_email(executor: impl sqlx::Executor<'_, Datab
 /// Query Plan:
 /// Index Scan using users_pkey on users
 ///   Index Cond: (id = 0)
-#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT created_at > now() - interval '1 year' AS \"is_recent!\" FROM public.users WHERE id = #{id}"))]
+#[tracing::instrument(level = "debug", skip_all, fields(sql = "SELECT created_at > now() - interval '1 year' AS is_recent FROM public.users WHERE id = #{id}"))]
 pub async fn get_user_is_recent(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, id: i32) -> Result<bool, super::ErrorReadOnly> {
     let query = sqlx::query(
         r"SELECT created_at > now() - interval '1 year' AS is_recent FROM public.users WHERE id = $1"

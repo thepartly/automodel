@@ -1,291 +1,7 @@
 use crate::query_definition::QueryDefinition;
-use crate::query_definition::{ChoiceGroup, ChoiceVariant, NestedChoiceBlock};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::fs;
-
-/// Generate SQL query variants for analysis by handling conditional syntax
-/// Returns list of (sql, variant_label) tuples
-fn generate_query_variants(sql: &str) -> Vec<(String, String)> {
-    let mut variants = Vec::new();
-
-    // First variant: remove all conditional blocks #[...]
-    let base_query = remove_conditional_blocks(sql);
-    if !base_query.trim().is_empty() {
-        variants.push((base_query, "base".to_string()));
-    }
-
-    // Additional variants: include each conditional block separately
-    let conditional_variants = extract_conditional_variants(sql);
-    for (i, variant_sql) in conditional_variants.into_iter().enumerate() {
-        variants.push((variant_sql, format!("variant {}", i + 1)));
-    }
-
-    variants
-}
-
-/// Parse a selector directive `#{selector=variant!}` / `#{selector=variant?}`
-/// at the very start (after optional whitespace) of a conditional block's
-/// content. Returns `(selector, variant, required, directive_char_len)` where
-/// `directive_char_len` is the number of characters from the start of
-/// `block_content` up to and including the closing `}` (so callers can strip it).
-fn parse_selector_directive(block_content: &str) -> Option<(String, String, bool, usize)> {
-    let leading_ws: usize = block_content
-        .chars()
-        .take_while(|c| c.is_whitespace())
-        .count();
-    let rest: String = block_content.chars().skip(leading_ws).collect();
-    if !rest.starts_with("#{") {
-        return None;
-    }
-    // Find the closing '}' of the directive.
-    let inner_end = rest.find('}')?;
-    let inner = &rest[2..inner_end]; // between "#{" and "}"
-
-    // Must be of the form: IDENT '=' IDENT ('!' | '?')
-    let (body, required) = if let Some(stripped) = inner.strip_suffix('!') {
-        (stripped, true)
-    } else if let Some(stripped) = inner.strip_suffix('?') {
-        (stripped, false)
-    } else {
-        return None;
-    };
-    let (selector, variant) = body.split_once('=')?;
-    let selector = selector.trim();
-    let variant = variant.trim();
-    if selector.is_empty() || variant.is_empty() {
-        return None;
-    }
-    if !is_valid_rust_identifier(selector) || !is_valid_rust_identifier(variant) {
-        return None;
-    }
-
-    // Character length consumed: leading whitespace + the "#{...}" directive.
-    let directive_char_len = leading_ws + rest[..inner_end + 1].chars().count();
-    Some((
-        selector.to_string(),
-        variant.to_string(),
-        required,
-        directive_char_len,
-    ))
-}
-
-/// Split a choice-variant block's content (the text between its outer `#[` `]`,
-/// with the selector directive already removed) into its direct parameters and
-/// any nested optional `#[...]` blocks (Option B). Direct parameters are those
-/// referenced outside every nested block and become mandatory variant fields;
-/// each nested block records its parameters, which become `Option<T>` variant
-/// fields.
-fn split_choice_variant_content(content: &str) -> (Vec<String>, Vec<NestedChoiceBlock>) {
-    let chars: Vec<char> = content.chars().collect();
-    let mut nested_blocks: Vec<NestedChoiceBlock> = Vec::new();
-    let mut direct_text = String::new();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            // Capture a nested block honoring any further nesting inside it.
-            let mut j = i + 2;
-            let mut depth = 1;
-            let mut inner = String::new();
-            while j < chars.len() && depth > 0 {
-                match chars[j] {
-                    '[' => {
-                        depth += 1;
-                        inner.push('[');
-                    }
-                    ']' => {
-                        depth -= 1;
-                        if depth > 0 {
-                            inner.push(']');
-                        }
-                    }
-                    c => inner.push(c),
-                }
-                j += 1;
-            }
-            let params: Vec<String> =
-                crate::types_extractor::parse_parameter_names_from_sql(&inner)
-                    .into_iter()
-                    .map(|p| strip_param_suffix(&p))
-                    .collect();
-            nested_blocks.push(NestedChoiceBlock { params });
-            i = j;
-        } else {
-            direct_text.push(chars[i]);
-            i += 1;
-        }
-    }
-    let direct_params: Vec<String> =
-        crate::types_extractor::parse_parameter_names_from_sql(&direct_text)
-            .into_iter()
-            .map(|p| strip_param_suffix(&p))
-            .collect();
-    (direct_params, nested_blocks)
-}
-
-/// Scan the raw SQL for conditional blocks whose content begins with a selector
-/// directive `#{selector=variant!}` / `#{selector=variant?}`, extract the
-/// mutually-exclusive choice groups, and return the SQL with those directives
-/// stripped (so downstream variant generation, type extraction and parameter
-/// ordering never see the synthetic selector token).
-///
-/// Constraints (validated here):
-/// - a query may declare multiple independent choice groups (one enum each),
-///   distinguished by selector name;
-/// - all branches of a group must agree on the `!`/`?` optionality marker;
-/// - variant names within a group must be unique;
-/// - a parameter name may not be shared across two different choice groups.
-fn extract_choice_groups(sql: &str) -> Result<(String, Vec<ChoiceGroup>)> {
-    use std::collections::HashMap;
-    let mut cleaned = String::new();
-    // Preserve first-seen selector order so generated enum/argument order is stable.
-    let mut selector_order: Vec<String> = Vec::new();
-    let mut variants_by_selector: HashMap<String, Vec<ChoiceVariant>> = HashMap::new();
-    let mut required_by_selector: HashMap<String, bool> = HashMap::new();
-    let mut total_blocks = 0usize;
-
-    let chars: Vec<char> = sql.chars().collect();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            // Found start of a conditional block; capture its content honoring nesting.
-            let mut j = i + 2;
-            let mut bracket_count = 1;
-            let mut content = String::new();
-            while j < chars.len() && bracket_count > 0 {
-                match chars[j] {
-                    '[' => {
-                        bracket_count += 1;
-                        content.push('[');
-                    }
-                    ']' => {
-                        bracket_count -= 1;
-                        if bracket_count > 0 {
-                            content.push(']');
-                        }
-                    }
-                    c => content.push(c),
-                }
-                j += 1;
-            }
-
-            let this_block_index = total_blocks;
-            total_blocks += 1;
-
-            if let Some((selector, variant, required, directive_len)) =
-                parse_selector_directive(&content)
-            {
-                // Enforce consistent optionality marker within each selector.
-                match required_by_selector.get(&selector) {
-                    Some(existing) if *existing != required => {
-                        anyhow::bail!(
-                            "Choice-group selector '{}' has conflicting optionality markers \
-                             ('?' vs '!'); all branches must use the same marker",
-                            selector
-                        );
-                    }
-                    None => {
-                        required_by_selector.insert(selector.clone(), required);
-                        selector_order.push(selector.clone());
-                    }
-                    _ => {}
-                }
-                let group_variants = variants_by_selector.entry(selector.clone()).or_default();
-
-                // Strip the directive from the block content, keep the rest.
-                let stripped: String = content.chars().skip(directive_len).collect();
-                // The exact text that will sit between the outer `#[` `]` in the
-                // cleaned SQL; nested `#[...]` blocks (Option B) are split out of
-                // it so their parameters become optional per-variant fields while
-                // the direct parameters become mandatory fields.
-                let emitted = stripped.trim_start().to_string();
-                let (params, nested_blocks) = split_choice_variant_content(&emitted);
-
-                // The same `#{selector=variant}` directive may be repeated on
-                // several blocks that must switch together (e.g. an output
-                // projection fragment plus its matching `LEFT JOIN` fragment). In
-                // that case, merge the new block into the existing variant so the
-                // branch spans every fragment.
-                if let Some(existing) = group_variants.iter_mut().find(|v| v.variant == variant) {
-                    existing.block_indices.push(this_block_index);
-                    existing.params.extend(params);
-                    existing.nested_blocks.extend(nested_blocks);
-                } else {
-                    group_variants.push(ChoiceVariant {
-                        variant,
-                        block_indices: vec![this_block_index],
-                        params,
-                        nested_blocks,
-                    });
-                }
-
-                // Emit the cleaned block (directive removed).
-                cleaned.push_str("#[");
-                cleaned.push_str(&emitted);
-                cleaned.push(']');
-            } else {
-                // Ungrouped conditional block — emit verbatim.
-                cleaned.push_str("#[");
-                cleaned.push_str(&content);
-                cleaned.push(']');
-            }
-
-            i = j;
-        } else {
-            cleaned.push(chars[i]);
-            i += 1;
-        }
-    }
-
-    if selector_order.is_empty() {
-        return Ok((sql.to_string(), Vec::new()));
-    }
-
-    // A choice group may coexist with additive (ungrouped) conditional blocks,
-    // and its branches may carry any combination of parameters — including
-    // branches with no parameters at all (e.g. `#[#{sort=unsorted!} LIMIT 100]`).
-    // Multiple independent groups may also coexist (each becomes its own enum
-    // argument). The code generator numbers and binds branch parameters by
-    // source-order membership with per-name deduplication, so a parameter is
-    // handled correctly whether it appears in one branch (a per-variant field),
-    // some branches (a per-variant field on each), or every branch (a shared
-    // top-level argument).
-
-    // A parameter may not be shared across two different choice groups: the
-    // generator would number and bind it once while it survives in two separate
-    // branch blocks, producing an inconsistent statement. Reject it early.
-    let mut param_owner: HashMap<String, String> = HashMap::new();
-    for selector in &selector_order {
-        for variant in &variants_by_selector[selector] {
-            for param in variant.all_params() {
-                match param_owner.get(&param) {
-                    Some(other) if other != selector => {
-                        anyhow::bail!(
-                            "Parameter '{}' is used by two different choice groups ('{}' and \
-                             '{}'); a parameter may belong to at most one choice group",
-                            param,
-                            other,
-                            selector
-                        );
-                    }
-                    _ => {
-                        param_owner.insert(param.clone(), selector.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    let groups = selector_order
-        .into_iter()
-        .map(|selector| ChoiceGroup {
-            required: required_by_selector[&selector],
-            variants: variants_by_selector.remove(&selector).unwrap_or_default(),
-            selector,
-        })
-        .collect();
-    Ok((cleaned, groups))
-}
 
 /// Remove all SQL comments (`--` line comments and `/* ... */` block comments,
 /// including nested block comments) from `sql`.
@@ -438,136 +154,6 @@ fn matches_at(chars: &[char], pos: usize, needle: &str) -> bool {
     chars[pos..pos + needle_chars.len()] == needle_chars[..]
 }
 
-/// Strip parameter suffixes (`??[?]`, `?[?]`, `??`, `[?]`, `?`) from a raw name.
-fn strip_param_suffix(name: &str) -> String {
-    let s = if let Some(stripped) = name.strip_suffix("[?]") {
-        stripped
-    } else {
-        name
-    };
-    if let Some(stripped) = s.strip_suffix("??") {
-        stripped.to_string()
-    } else if let Some(stripped) = s.strip_suffix('?') {
-        stripped.to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-/// Remove all conditional blocks #[...] from SQL (bracket-aware so that nested
-/// `#[...]` blocks are removed together with their enclosing block).
-fn remove_conditional_blocks(sql: &str) -> String {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut result = String::with_capacity(sql.len());
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            // Skip the whole block honoring nesting.
-            let mut depth = 1;
-            let mut j = i + 2;
-            while j < chars.len() && depth > 0 {
-                match chars[j] {
-                    '[' => depth += 1,
-                    ']' => depth -= 1,
-                    _ => {}
-                }
-                j += 1;
-            }
-            i = j;
-        } else {
-            result.push(chars[i]);
-            i += 1;
-        }
-    }
-
-    // Clean up extra whitespace
-    result = result.replace("  ", " ").trim().to_string();
-    result
-}
-
-/// Strip the outermost pair of a nested `#[...]` marker sequence, keeping the
-/// inner content. Repeated application inlines every nested block. Used to build
-/// a valid "fully included" isolated variant for EXPLAIN/type extraction.
-fn inline_nested_markers(sql: &str) -> String {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut result = String::with_capacity(sql.len());
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            // Keep the inner content, drop the `#[` and its matching `]`.
-            let mut depth = 1;
-            let mut j = i + 2;
-            while j < chars.len() && depth > 0 {
-                match chars[j] {
-                    '[' => {
-                        depth += 1;
-                        result.push('[');
-                    }
-                    ']' => {
-                        depth -= 1;
-                        if depth > 0 {
-                            result.push(']');
-                        }
-                    }
-                    c => result.push(c),
-                }
-                j += 1;
-            }
-            i = j;
-        } else {
-            result.push(chars[i]);
-            i += 1;
-        }
-    }
-    result
-}
-
-/// Extract variants where each conditional block is included
-fn extract_conditional_variants(sql: &str) -> Vec<String> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut variants = Vec::new();
-    let mut i = 0usize;
-
-    while i < chars.len() {
-        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            // Locate the matching closing bracket for this (possibly nested) block.
-            let start_pos = i;
-            let mut depth = 1;
-            let mut j = i + 2;
-            while j < chars.len() && depth > 0 {
-                match chars[j] {
-                    '[' => depth += 1,
-                    ']' => depth -= 1,
-                    _ => {}
-                }
-                j += 1;
-            }
-            let end_pos = j; // one past the matching ']'
-            let conditional_content: String = chars[start_pos + 2..end_pos - 1].iter().collect();
-
-            // Create variant with this conditional block included, then remove
-            // all remaining (other) conditional blocks and inline any nested
-            // markers left inside the included block so the result is valid SQL.
-            let mut variant: String = chars[..start_pos].iter().collect();
-            variant.push_str(&conditional_content);
-            let tail: String = chars[end_pos..].iter().collect();
-            variant.push_str(&tail);
-            variant = remove_conditional_blocks(&variant);
-            variant = inline_nested_markers(&variant);
-
-            if !variant.trim().is_empty() {
-                variants.push(variant);
-            }
-
-            i = end_pos;
-        } else {
-            i += 1;
-        }
-    }
-
-    variants
-}
-
 /// Validates that a module name is a valid Rust identifier
 fn validate_module_name(module_name: &str) -> Result<(), String> {
     if module_name.is_empty() {
@@ -575,7 +161,7 @@ fn validate_module_name(module_name: &str) -> Result<(), String> {
     }
 
     // Reuse existing validation logic
-    if !is_valid_rust_identifier(module_name) {
+    if !crate::sql_tree::is_valid_rust_identifier(module_name) {
         // Check specific error cases to provide better error messages
         let first_char = module_name.chars().next().unwrap();
         if !first_char.is_ascii_alphabetic() && first_char != '_' {
@@ -596,7 +182,7 @@ fn validate_module_name(module_name: &str) -> Result<(), String> {
         }
 
         // If we get here, it must be a reserved keyword
-        if is_rust_keyword(module_name) {
+        if crate::sql_tree::is_rust_keyword(module_name) {
             return Err(format!(
                 "Module name '{}' is a reserved Rust keyword and cannot be used",
                 module_name
@@ -611,88 +197,6 @@ fn validate_module_name(module_name: &str) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// Check if a string is a valid Rust identifier
-fn is_valid_rust_identifier(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-
-    // First character must be a letter or underscore
-    if !first.is_alphabetic() && first != '_' {
-        return false;
-    }
-
-    // Remaining characters must be alphanumeric or underscore
-    for c in chars {
-        if !c.is_alphanumeric() && c != '_' {
-            return false;
-        }
-    }
-
-    // Check if it's a Rust keyword
-    !is_rust_keyword(name)
-}
-
-/// Check if a string is a Rust keyword
-fn is_rust_keyword(name: &str) -> bool {
-    matches!(
-        name,
-        "as" | "break"
-            | "const"
-            | "continue"
-            | "crate"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "pub"
-            | "ref"
-            | "return"
-            | "self"
-            | "Self"
-            | "static"
-            | "struct"
-            | "super"
-            | "trait"
-            | "true"
-            | "type"
-            | "unsafe"
-            | "use"
-            | "where"
-            | "while"
-            | "async"
-            | "await"
-            | "dyn"
-            | "abstract"
-            | "become"
-            | "box"
-            | "do"
-            | "final"
-            | "macro"
-            | "override"
-            | "priv"
-            | "typeof"
-            | "unsized"
-            | "virtual"
-            | "yield"
-            | "try"
-    )
 }
 
 /// Auto-quote a `description:` value in the metadata YAML so free text can
@@ -891,40 +395,20 @@ async fn parse_sql_file(
         .trim()
         .to_string();
 
-    // Keep raw SQL (with {col!} / "col!" syntax) — extract_query_types strips it at build time.
     let sql = sql_raw;
 
     if sql.is_empty() {
         anyhow::bail!("SQL file contains no SQL query for '{}'", name);
     }
 
-    // Extract mutually-exclusive choice groups (`#{selector=variant!}` directives)
-    // and strip those directives so all downstream processing sees clean SQL.
-    let (sql, choice_groups) = extract_choice_groups(&sql)
-        .with_context(|| format!("Failed to parse choice groups in query '{}'", name))?;
-
-    // Generate SQL variants and convert to positional parameters at parse time.
-    // Also strip non-null column cast syntax so runtime SQL is clean.
-    let sql_variants_raw = generate_query_variants(&sql);
-    let sql_variants: Vec<(String, Vec<String>, String)> = sql_variants_raw
-        .into_iter()
-        .map(|(variant_sql, variant_label)| {
-            let (clean_sql, _) = crate::types_extractor::strip_non_null_column_casts(&variant_sql);
-            let (converted_sql, param_names) =
-                crate::types_extractor::convert_named_params_to_positional(&clean_sql);
-            (converted_sql, param_names, variant_label)
-        })
-        .collect();
-
-    // Group-aware valid variants used for EXPLAIN validation and type extraction:
-    // every ungrouped block always included plus one branch per choice group.
-    let explain_variants = crate::types_extractor::generate_explain_variants(&sql, &choice_groups);
+    // Canonical token-tree, built from the raw (comment-free) SQL, which still
+    // carries both selector directives and cast syntax — `SqlTree::parse` decodes
+    // directives into block gates and casts into `Cast` nodes. This is the single
+    // structured source of truth for the query's SQL.
+    let tree = crate::sql_tree::SqlTree::parse(&sql);
 
     Ok(QueryDefinition {
         name: name.to_string(),
-        sql,
-        sql_variants,
-        explain_variants,
         description: metadata.description,
         module: module.to_string(),
         expect: metadata.expect.unwrap_or_default(),
@@ -964,7 +448,7 @@ async fn parse_sql_file(
             derives.extend(metadata.error_type_derives);
             derives
         },
-        choice_groups,
+        tree,
     })
 }
 
@@ -1050,7 +534,7 @@ pub async fn scan_sql_files(
         };
 
         // Validate query name
-        if !is_valid_rust_identifier(&query_name) {
+        if !crate::sql_tree::is_valid_rust_identifier(&query_name) {
             anyhow::bail!(
                 "SQL file name '{}' is not a valid Rust function name. Use only alphanumeric characters and underscores, and start with a letter or underscore.",
                 query_name
@@ -1063,68 +547,6 @@ pub async fn scan_sql_files(
     }
 
     Ok(queries)
-}
-
-#[cfg(test)]
-mod choice_group_tests {
-    use super::*;
-
-    // NOTE: Happy-path choice-group behavior (pure groups, optional groups,
-    // shared/per-variant/paramless branch parameters, and mixing with additive
-    // blocks) is exercised end-to-end against a real database by the example-app
-    // integration test `test_choice_groups.rs`, driven by the `.sql` files in
-    // `example-app/queries/choice_groups/`. The tests below cover parser-only
-    // invariants and the invalid inputs that must be rejected at build time
-    // (which therefore cannot live in the example-app query set).
-
-    #[test]
-    fn no_directives_yields_no_groups() {
-        let sql = "SELECT id FROM t WHERE 1 = 1 #[AND id = #{x?}]";
-        let (cleaned, groups) = extract_choice_groups(sql).unwrap();
-        assert!(groups.is_empty());
-        assert_eq!(cleaned, sql);
-    }
-
-    #[test]
-    fn conflicting_markers_error() {
-        let sql = include_str!("../tests/fixtures/choice_groups/invalid_conflicting_markers.sql");
-        let err = extract_choice_groups(sql).unwrap_err().to_string();
-        assert!(err.contains("conflicting optionality markers"), "{}", err);
-    }
-
-    #[test]
-    fn multiple_independent_groups_parse_separately() {
-        // Two distinct selectors with no shared parameters form two independent
-        // choice groups, preserving first-seen selector order.
-        let sql = "SELECT 1\n#[#{s=a!} ORDER BY a]\n#[#{t=b!} ORDER BY b]";
-        let (_, groups) = extract_choice_groups(sql).unwrap();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].selector, "s");
-        assert_eq!(groups[1].selector, "t");
-        assert_eq!(groups[0].variants[0].variant, "a");
-        assert_eq!(groups[1].variants[0].variant, "b");
-    }
-
-    #[test]
-    fn cross_group_shared_param_errors() {
-        let sql =
-            include_str!("../tests/fixtures/choice_groups/invalid_cross_group_shared_param.sql");
-        let err = extract_choice_groups(sql).unwrap_err().to_string();
-        assert!(err.contains("two different choice groups"), "{}", err);
-    }
-
-    #[test]
-    fn duplicate_variant_merges_into_multiblock() {
-        // Repeating the same `#{selector=variant}` directive merges the blocks
-        // into a single branch that spans every fragment (e.g. a projection
-        // fragment plus a matching JOIN fragment that must switch together).
-        let sql = include_str!("../tests/fixtures/choice_groups/invalid_duplicate_variant.sql");
-        let (_, groups) = extract_choice_groups(sql).unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].variants.len(), 1);
-        assert_eq!(groups[0].variants[0].variant, "a");
-        assert_eq!(groups[0].variants[0].block_indices, vec![0, 1]);
-    }
 }
 
 #[cfg(test)]

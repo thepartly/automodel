@@ -7,7 +7,7 @@ use crate::codegen::types_generator::{
 use crate::query_definition::{ExpectedResult, QueryDefinition, TelemetryLevel};
 use crate::query_definition_rt::QueryDefinitionRuntime;
 use crate::rust_type::{InputParam, OutputColumn};
-use crate::types_extractor::{parse_parameter_names_from_sql, QueryTypeInfo};
+use crate::types_extractor::QueryTypeInfo;
 use crate::utils::{to_pascal_case, to_snake_case};
 use anyhow::Result;
 
@@ -425,7 +425,8 @@ fn generate_tracing_attribute(query: &QueryDefinition, param_names: &[String]) -
     let should_include_sql = query.telemetry.include_sql;
     if should_include_sql {
         let escaped_sql = query
-            .sql
+            .tree
+            .template()
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('\n', "\\n");
@@ -509,7 +510,7 @@ pub fn generate_function_code_without_enums(
     };
 
     // Extract clean parameter names directly from the SQL for function signature
-    let original_param_names = parse_parameter_names_from_sql(&query.sql);
+    let original_param_names = query.tree.param_names();
     let clean_param_names: Vec<String> = original_param_names
         .iter()
         .map(|name| strip_input_suffix(name))
@@ -553,7 +554,7 @@ pub fn generate_function_code_without_enums(
     }
 
     // Generate diff struct for conditions_type if needed
-    if use_conditional_diff && type_info.parsed_sql.is_some() {
+    if use_conditional_diff && query.tree.top_block_count() > 0 {
         let struct_name = if let Some(override_name) = diff_struct_name_override {
             override_name.to_string()
         } else {
@@ -621,10 +622,17 @@ pub fn generate_function_code_without_enums(
         }
     }
 
+    // Choice groups derived from the canonical tree (single source of truth).
+    let choice_groups = query.tree.derive_choice_groups()?;
+
     // Generate the selector enum(s) for the query's choice group(s).
-    if !query.choice_groups.is_empty() {
-        code.push_str(&generate_choice_group_enum_defs(query, type_info));
-        for group in &query.choice_groups {
+    if !choice_groups.is_empty() {
+        code.push_str(&generate_choice_group_enum_defs(
+            query,
+            type_info,
+            &choice_groups,
+        ));
+        for group in &choice_groups {
             emitted_struct_names.insert(choice_group_enum_name(&query.name, &group.selector));
         }
     }
@@ -648,22 +656,22 @@ pub fn generate_function_code_without_enums(
         }
     }
 
-    let tracing_attribute = if !query.choice_groups.is_empty() {
+    let tracing_attribute = if !choice_groups.is_empty() {
         // Variant fields are not function arguments; only skip real args.
-        let arg_names = choice_group_arg_names(query, type_info);
+        let arg_names = choice_group_arg_names(query, type_info, &choice_groups);
         generate_tracing_attribute(query, &arg_names)
     } else {
         generate_tracing_attribute(query, &clean_param_names)
     };
     code.push_str(&tracing_attribute);
 
-    let input_params = if !query.choice_groups.is_empty() {
+    let input_params = if !choice_groups.is_empty() {
         // Mutually-exclusive choice group: selector enum + non-grouped args.
-        generate_choice_group_signature(query, type_info)
+        generate_choice_group_signature(query, type_info, &choice_groups)
     } else if use_multiunzip {
         // For multiunzip, generate a single Vec<StructName> parameter
         generate_multiunzip_param(&query.name, "items")
-    } else if use_conditional_diff && type_info.parsed_sql.is_some() {
+    } else if use_conditional_diff && query.tree.top_block_count() > 0 {
         // For conditions_type, generate old and new struct parameters
         generate_conditional_diff_params(
             &query.name,
@@ -742,20 +750,14 @@ pub fn generate_function_code_without_enums(
     ));
 
     // Generate function body
-    let function_body = if !query.choice_groups.is_empty() {
+    let function_body = if !choice_groups.is_empty() {
         let mut body = String::new();
-        let parsed_sql = type_info.parsed_sql.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "internal error: choice-group query '{}' has no parsed conditional SQL",
-                query.name
-            )
-        })?;
         generate_choice_group_function_body(
             &mut body,
             query,
             type_info,
-            parsed_sql,
             &base_return_type,
+            &choice_groups,
         )?;
         body
     } else {
@@ -780,13 +782,12 @@ fn generate_function_body(
     let mut body = String::new();
 
     // Check if this query has conditional blocks
-    if let Some(parsed_sql) = &type_info.parsed_sql {
+    if query.tree.top_block_count() > 0 {
         // Generate dynamic SQL building for conditional queries
         generate_conditional_function_body(
             &mut body,
             query,
             type_info,
-            parsed_sql,
             return_type,
             defaults,
         )?;
@@ -821,8 +822,9 @@ fn generate_static_function_body(
         }
     }
 
-    // Get pre-computed converted SQL and param names from first variant (base query)
-    let (converted_sql, param_names, _variant_label) = &query.sql_variants[0];
+    // Get converted SQL and param names from first variant (base query)
+    let query_variants = query.tree.query_variants();
+    let (converted_sql, param_names, _variant_label) = &query_variants[0];
 
     // Build the SQLx query with parameter bindings
     let raw_string = generate_indented_raw_string_literal(converted_sql);
@@ -837,7 +839,7 @@ fn generate_static_function_body(
             // Generate multiunzip pattern with struct field extraction
 
             // Get clean parameter names for field extraction
-            let original_param_names = parse_parameter_names_from_sql(&query.sql);
+            let original_param_names = query.tree.param_names();
             let clean_param_names: Vec<String> = original_param_names
                 .iter()
                 .map(|name| strip_input_suffix(name))
@@ -981,7 +983,9 @@ fn choice_group_type_map(
     query: &QueryDefinition,
     type_info: &QueryTypeInfo,
 ) -> std::collections::HashMap<String, InputParam> {
-    let clean_names: Vec<String> = parse_parameter_names_from_sql(&query.sql)
+    let clean_names: Vec<String> = query
+        .tree
+        .param_names()
         .iter()
         .map(|n| strip_input_suffix(n))
         .collect();
@@ -1010,18 +1014,24 @@ fn render_choice_param_type(ip: &InputParam) -> String {
 /// order: non-grouped params (source order), then each group's selector.
 /// Variant fields are NOT arguments (they live inside the enum), so they must be
 /// excluded from e.g. `#[tracing::instrument(skip(...))]`.
-fn choice_group_arg_names(query: &QueryDefinition, type_info: &QueryTypeInfo) -> Vec<String> {
+fn choice_group_arg_names(
+    query: &QueryDefinition,
+    type_info: &QueryTypeInfo,
+    groups: &[crate::sql_tree::ChoiceGroup],
+) -> Vec<String> {
     let type_map = choice_group_type_map(query, type_info);
 
     let mut selectors: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut grouped: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for group in &query.choice_groups {
+    for group in groups {
         selectors.insert(group.selector.clone());
         for v in &group.variants {
             grouped.extend(v.all_params());
         }
     }
-    let clean_names: Vec<String> = parse_parameter_names_from_sql(&query.sql)
+    let clean_names: Vec<String> = query
+        .tree
+        .param_names()
         .iter()
         .map(|n| strip_input_suffix(n))
         .collect();
@@ -1036,17 +1046,21 @@ fn choice_group_arg_names(query: &QueryDefinition, type_info: &QueryTypeInfo) ->
             names.push(name.clone());
         }
     }
-    for group in &query.choice_groups {
+    for group in groups {
         names.push(group.selector.clone());
     }
     names
 }
 
 /// Emit the selector enum definition(s) for a query's choice group(s).
-fn generate_choice_group_enum_defs(query: &QueryDefinition, type_info: &QueryTypeInfo) -> String {
+fn generate_choice_group_enum_defs(
+    query: &QueryDefinition,
+    type_info: &QueryTypeInfo,
+    groups: &[crate::sql_tree::ChoiceGroup],
+) -> String {
     let type_map = choice_group_type_map(query, type_info);
     let mut code = String::new();
-    for group in &query.choice_groups {
+    for group in groups {
         let enum_name = choice_group_enum_name(&query.name, &group.selector);
 
         code.push_str("#[derive(Debug, Clone)]\n");
@@ -1095,20 +1109,26 @@ fn generate_choice_group_enum_defs(query: &QueryDefinition, type_info: &QueryTyp
 /// Build the function-signature argument list for a choice-group query:
 /// non-grouped params (source order), then for each group its selector enum
 /// argument.
-fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTypeInfo) -> String {
+fn generate_choice_group_signature(
+    query: &QueryDefinition,
+    type_info: &QueryTypeInfo,
+    groups: &[crate::sql_tree::ChoiceGroup],
+) -> String {
     let type_map = choice_group_type_map(query, type_info);
 
     // Union of all selector names and all grouped params across every group.
     let mut selectors: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut grouped: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for group in &query.choice_groups {
+    for group in groups {
         selectors.insert(group.selector.clone());
         for v in &group.variants {
             grouped.extend(v.all_params());
         }
     }
 
-    let clean_names: Vec<String> = parse_parameter_names_from_sql(&query.sql)
+    let clean_names: Vec<String> = query
+        .tree
+        .param_names()
         .iter()
         .map(|n| strip_input_suffix(n))
         .collect();
@@ -1130,7 +1150,7 @@ fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTyp
     }
 
     // Per group: selector enum argument.
-    for group in &query.choice_groups {
+    for group in groups {
         let enum_name = choice_group_enum_name(&query.name, &group.selector);
         let sel_ty = if group.required {
             enum_name
@@ -1157,12 +1177,13 @@ fn generate_choice_group_signature(query: &QueryDefinition, type_info: &QueryTyp
 /// mode. All values flow through `push_bind`, never string interpolation.
 fn emit_choice_group_block_tokens(
     body: &mut String,
-    tokens: &[SqlToken],
+    tokens: &[crate::sql_tree::SqlToken],
     indent: &str,
     grouped_top: bool,
     all_params: &[String],
     type_info: &QueryTypeInfo,
 ) {
+    use crate::sql_tree::{Gate, SqlToken};
     for token in tokens {
         match token {
             SqlToken::Lit(s) => {
@@ -1170,8 +1191,15 @@ fn emit_choice_group_block_tokens(
                     body.push_str(&format!("{}qb.push({});\n", indent, raw_string_literal(s)));
                 }
             }
-            SqlToken::Param(name) => {
-                let clean = name.trim_end_matches('?');
+            SqlToken::Cast(c) => {
+                body.push_str(&format!(
+                    "{}qb.push({});\n",
+                    indent,
+                    raw_string_literal(&c.name)
+                ));
+            }
+            SqlToken::Param(p) => {
+                let clean = p.name.as_str();
                 let owner = if grouped_top {
                     clean.to_string()
                 } else {
@@ -1181,19 +1209,24 @@ fn emit_choice_group_block_tokens(
                     emit_push_bind(body, indent, ti, &owner, true, clean);
                 }
             }
-            SqlToken::Block { inner, params } => {
+            SqlToken::Block(b) => {
+                let params: &[String] = match &b.gate {
+                    Gate::Optional { params } => params,
+                    // Choice gates never nest inside a block body.
+                    Gate::Choice { .. } => &[],
+                };
                 if params.is_empty() {
                     emit_choice_group_block_tokens(
-                        body, inner, indent, false, all_params, type_info,
+                        body, &b.inner, indent, false, all_params, type_info,
                     );
                     continue;
                 }
-                let gate = params[0].trim_end_matches('?');
+                let gate = params[0].as_str();
                 body.push_str(&format!("{}if {}.is_some() {{\n", indent, gate));
                 let inner_indent = format!("{}    ", indent);
                 emit_choice_group_block_tokens(
                     body,
-                    inner,
+                    &b.inner,
                     &inner_indent,
                     false,
                     all_params,
@@ -1201,6 +1234,24 @@ fn emit_choice_group_block_tokens(
                 );
                 body.push_str(&format!("{}}}\n", indent));
             }
+        }
+    }
+}
+
+/// Collect the bare parameter names referenced anywhere within a block's inner
+/// tokens (direct and inside nested blocks), in source order and de-duplicated.
+/// Used to destructure exactly the enum fields a choice-group branch references.
+fn collect_block_param_names(nodes: &[crate::sql_tree::SqlToken], out: &mut Vec<String>) {
+    use crate::sql_tree::SqlToken;
+    for n in nodes {
+        match n {
+            SqlToken::Param(p) => {
+                if !out.contains(&p.name) {
+                    out.push(p.name.clone());
+                }
+            }
+            SqlToken::Block(b) => collect_block_param_names(&b.inner, out),
+            _ => {}
         }
     }
 }
@@ -1222,10 +1273,10 @@ fn generate_choice_group_function_body(
     body: &mut String,
     query: &QueryDefinition,
     type_info: &QueryTypeInfo,
-    parsed_sql: &crate::types_extractor::ParsedSql,
     return_type: &str,
+    groups: &[crate::sql_tree::ChoiceGroup],
 ) -> Result<()> {
-    use crate::types_extractor::parse_parameter_names_from_sql;
+    use crate::sql_tree::{Gate, SqlToken};
 
     if query.conditions_type.is_enabled() || query.parameters_type.is_enabled() {
         anyhow::bail!(
@@ -1235,110 +1286,98 @@ fn generate_choice_group_function_body(
         );
     }
 
-    let all_params = parse_parameter_names_from_sql(&query.sql);
-
-    // Map each top-level conditional-block index to its owning (group, variant).
-    let mut block_owner: std::collections::HashMap<usize, (usize, usize)> =
-        std::collections::HashMap::new();
-    for (gi, group) in query.choice_groups.iter().enumerate() {
-        for (vi, variant) in group.variants.iter().enumerate() {
-            for &bi in &variant.block_indices {
-                block_owner.insert(bi, (gi, vi));
-            }
-        }
-    }
+    let all_params = query.tree.param_names();
 
     body.push_str("    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(\"\");\n");
 
-    let tokens = tokenize_base_sql(&parsed_sql.base_sql);
-    let mut block_idx = 0usize;
-    for token in &tokens {
+    for token in query.tree.nodes() {
         match token {
             SqlToken::Lit(s) => {
                 if !s.is_empty() {
                     body.push_str(&format!("    qb.push({});\n", raw_string_literal(s)));
                 }
             }
-            SqlToken::Param(name) => {
+            SqlToken::Cast(c) => {
+                body.push_str(&format!("    qb.push({});\n", raw_string_literal(&c.name)));
+            }
+            SqlToken::Param(p) => {
                 // Top-level (base) parameter: always present.
-                let clean = name.trim_end_matches('?');
+                let clean = p.name.as_str();
                 if let Some(ti) = find_input_type(&all_params, type_info, clean) {
                     emit_push_bind(body, "    ", ti, clean, false, clean);
                 }
             }
-            SqlToken::Block { .. } => {
-                let i = block_idx;
-                block_idx += 1;
-                let block = &parsed_sql.conditional_blocks[i];
-                // Use the directive-stripped body so the choice-group selector
-                // markers (`#{sort=asc!}`) never appear in the emitted SQL.
-                let inner = tokenize_base_sql(&block.sql_content);
-
-                if let Some(&(gi, vi)) = block_owner.get(&i) {
+            SqlToken::Block(b) => match &b.gate {
+                Gate::Choice {
+                    selector,
+                    variant,
+                    required,
+                } => {
                     // Grouped block: emit under an `if let` for its branch.
-                    let group = &query.choice_groups[gi];
-                    let variant = &group.variants[vi];
-                    let enum_name = choice_group_enum_name(&query.name, &group.selector);
-                    let pascal = to_pascal_case(&variant.variant);
-                    let variant_has_fields = !variant.all_params().is_empty();
+                    let enum_name = choice_group_enum_name(&query.name, selector);
+                    let pascal = to_pascal_case(variant);
+                    let variant_has_fields = groups
+                        .iter()
+                        .find(|g| g.selector == *selector)
+                        .and_then(|g| g.variants.iter().find(|v| v.variant == *variant))
+                        .map(|v| !v.all_params().is_empty())
+                        .unwrap_or(false);
                     let pattern = if !variant_has_fields {
                         format!("{}::{}", enum_name, pascal)
                     } else {
                         // Destructure the fields referenced in this block (direct
                         // and nested), ignoring the rest of the variant.
                         let mut used: Vec<String> = Vec::new();
-                        for p in parse_parameter_names_from_sql(&block.sql_content) {
-                            let c = strip_input_suffix(&p);
-                            if !used.contains(&c) {
-                                used.push(c);
-                            }
-                        }
+                        collect_block_param_names(&b.inner, &mut used);
                         if used.is_empty() {
                             format!("{}::{} {{ .. }}", enum_name, pascal)
                         } else {
                             format!("{}::{} {{ {}, .. }}", enum_name, pascal, used.join(", "))
                         }
                     };
-                    let arm = if group.required {
+                    let arm = if *required {
                         pattern
                     } else {
                         format!("Some({})", pattern)
                     };
-                    body.push_str(&format!("    if let {} = &{} {{\n", arm, group.selector));
+                    body.push_str(&format!("    if let {} = &{} {{\n", arm, selector));
                     emit_choice_group_block_tokens(
                         body,
-                        &inner,
+                        &b.inner,
                         "        ",
                         true,
                         &all_params,
                         type_info,
                     );
                     body.push_str("    }\n");
-                } else if block.parameters.is_empty() {
-                    // Additive block with no parameters: always included.
-                    emit_choice_group_block_tokens(
-                        body,
-                        &inner,
-                        "    ",
-                        false,
-                        &all_params,
-                        type_info,
-                    );
-                } else {
-                    // Additive block: gated by its first parameter's presence.
-                    let gate = block.parameters[0].trim_end_matches('?');
-                    body.push_str(&format!("    if {}.is_some() {{\n", gate));
-                    emit_choice_group_block_tokens(
-                        body,
-                        &inner,
-                        "        ",
-                        false,
-                        &all_params,
-                        type_info,
-                    );
-                    body.push_str("    }\n");
                 }
-            }
+                Gate::Optional { params } => {
+                    if params.is_empty() {
+                        // Additive block with no parameters: always included.
+                        emit_choice_group_block_tokens(
+                            body,
+                            &b.inner,
+                            "    ",
+                            false,
+                            &all_params,
+                            type_info,
+                        );
+                    } else {
+                        // Additive block: gated by its first parameter's presence.
+                        let gate = params[0].as_str();
+                        body.push_str(&format!("    if {}.is_some() {{\n", gate));
+                        emit_choice_group_block_tokens(
+                            body,
+                            &b.inner,
+                            "        ",
+                            false,
+                            &all_params,
+                            type_info,
+                        );
+                        body.push_str("    }\n");
+                    }
+                }
+            },
         }
     }
 
@@ -1346,91 +1385,6 @@ fn generate_choice_group_function_body(
 
     generate_query_execution(body, query, type_info, return_type);
     Ok(())
-}
-
-/// Generate function body for conditional (dynamic) SQL queries
-/// A single token of a parsed SQL template (base SQL with `#{param}`
-/// placeholders and `#[...]` conditional blocks preserved).
-enum SqlToken {
-    /// Literal SQL text to emit verbatim.
-    Lit(String),
-    /// A `#{param}` placeholder (name may retain a trailing `?`).
-    Param(String),
-    /// A `#[...]` conditional block with its inner tokens and the list of
-    /// parameter names referenced inside it (in source order).
-    Block {
-        inner: Vec<SqlToken>,
-        params: Vec<String>,
-    },
-}
-
-/// Tokenize a base SQL template into an ordered sequence of literal, parameter
-/// and conditional-block tokens. Preserves all literal characters (including
-/// whitespace) exactly so the reconstructed SQL matches the source.
-fn tokenize_base_sql(sql: &str) -> Vec<SqlToken> {
-    use crate::types_extractor::parse_parameter_names_from_sql;
-
-    let mut tokens = Vec::new();
-    let mut lit = String::new();
-    let mut chars = sql.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '#' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next(); // consume '['
-                    let mut inner = String::new();
-                    let mut depth = 1;
-                    while let Some(c) = chars.next() {
-                        if c == '[' {
-                            depth += 1;
-                            inner.push(c);
-                        } else if c == ']' {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                            inner.push(c);
-                        } else {
-                            inner.push(c);
-                        }
-                    }
-                    if !lit.is_empty() {
-                        tokens.push(SqlToken::Lit(std::mem::take(&mut lit)));
-                    }
-                    let params = parse_parameter_names_from_sql(&inner);
-                    let inner_tokens = tokenize_base_sql(&inner);
-                    tokens.push(SqlToken::Block {
-                        inner: inner_tokens,
-                        params,
-                    });
-                }
-                Some('{') => {
-                    chars.next(); // consume '{'
-                    let mut name = String::new();
-                    for c in chars.by_ref() {
-                        if c == '}' {
-                            break;
-                        }
-                        name.push(c);
-                    }
-                    if !lit.is_empty() {
-                        tokens.push(SqlToken::Lit(std::mem::take(&mut lit)));
-                    }
-                    tokens.push(SqlToken::Param(name));
-                }
-                _ => lit.push(ch),
-            }
-        } else {
-            lit.push(ch);
-        }
-    }
-
-    if !lit.is_empty() {
-        tokens.push(SqlToken::Lit(lit));
-    }
-
-    tokens
 }
 
 /// Produce a Rust raw string literal for `s`, preserving its contents exactly
@@ -1547,35 +1501,34 @@ fn generate_conditional_function_body(
     body: &mut String,
     query: &QueryDefinition,
     type_info: &QueryTypeInfo,
-    parsed_sql: &crate::types_extractor::ParsedSql,
     return_type: &str,
     _defaults: &crate::DefaultsConfig,
 ) -> Result<()> {
-    use crate::types_extractor::parse_parameter_names_from_sql;
+    use crate::sql_tree::{Gate, SqlToken};
 
     let use_conditional_diff = query.conditions_type.is_enabled();
     let use_structured_params = query.parameters_type.is_enabled() && !use_conditional_diff;
-    // Parse all parameters from the original SQL to get their order and types.
-    let all_params = parse_parameter_names_from_sql(&query.sql);
+    // Parameter order/types come from the canonical tree (suffixes retained).
+    let all_params = query.tree.param_names();
 
-    // Tokenize the base SQL (with `#{param}` placeholders and `#[...]` blocks
-    // preserved) and emit a sqlx::QueryBuilder. `push_bind` assigns `$N`
-    // placeholders automatically in push order, so no manual renumbering or
-    // inclusion tracking is required.
-    let tokens = tokenize_base_sql(&parsed_sql.base_sql);
-
+    // Walk the canonical SQL tree and emit a sqlx::QueryBuilder. `push_bind`
+    // assigns `$N` placeholders automatically in push order, so no manual
+    // renumbering or inclusion tracking is required.
     body.push_str("    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(\"\");\n");
 
-    for token in &tokens {
+    for token in query.tree.nodes() {
         match token {
             SqlToken::Lit(s) => {
                 if !s.is_empty() {
                     body.push_str(&format!("    qb.push({});\n", raw_string_literal(s)));
                 }
             }
-            SqlToken::Param(name) => {
+            SqlToken::Cast(c) => {
+                body.push_str(&format!("    qb.push({});\n", raw_string_literal(&c.name)));
+            }
+            SqlToken::Param(p) => {
                 // Base (non-conditional) parameter: always present.
-                let clean = name.trim_end_matches('?');
+                let clean = p.name.as_str();
                 let owner = if use_structured_params {
                     format!("params.{}", clean)
                 } else {
@@ -1585,17 +1538,31 @@ fn generate_conditional_function_body(
                     emit_push_bind(body, "    ", ti, &owner, false, clean);
                 }
             }
-            SqlToken::Block { inner, params } => {
+            SqlToken::Block(b) => {
+                let params: &[String] = match &b.gate {
+                    Gate::Optional { params } => params,
+                    // Choice gates are handled by the choice-group path, not here.
+                    Gate::Choice { .. } => &[],
+                };
                 if params.is_empty() {
                     // No parameters gate this block; always include it.
-                    for t in inner {
-                        if let SqlToken::Lit(s) = t {
-                            if !s.is_empty() {
+                    for t in &b.inner {
+                        match t {
+                            SqlToken::Lit(s) => {
+                                if !s.is_empty() {
+                                    body.push_str(&format!(
+                                        "    qb.push({});\n",
+                                        raw_string_literal(s)
+                                    ));
+                                }
+                            }
+                            SqlToken::Cast(c) => {
                                 body.push_str(&format!(
                                     "    qb.push({});\n",
-                                    raw_string_literal(s)
+                                    raw_string_literal(&c.name)
                                 ));
                             }
+                            _ => {}
                         }
                     }
                     continue;
@@ -1603,7 +1570,7 @@ fn generate_conditional_function_body(
 
                 // The whole block is included/excluded based on its first
                 // parameter; all of its parameters are then bound together.
-                let gate = params[0].trim_end_matches('?');
+                let gate = params[0].as_str();
                 let condition = if use_conditional_diff {
                     format!("old.{g} != new.{g}", g = gate)
                 } else if use_structured_params {
@@ -1613,7 +1580,7 @@ fn generate_conditional_function_body(
                 };
                 body.push_str(&format!("    if {} {{\n", condition));
 
-                for t in inner {
+                for t in &b.inner {
                     match t {
                         SqlToken::Lit(s) => {
                             if !s.is_empty() {
@@ -1623,8 +1590,14 @@ fn generate_conditional_function_body(
                                 ));
                             }
                         }
-                        SqlToken::Param(name) => {
-                            let clean = name.trim_end_matches('?');
+                        SqlToken::Cast(c) => {
+                            body.push_str(&format!(
+                                "        qb.push({});\n",
+                                raw_string_literal(&c.name)
+                            ));
+                        }
+                        SqlToken::Param(p) => {
+                            let clean = p.name.as_str();
                             let (owner, owner_is_ref) = if use_conditional_diff {
                                 (format!("new.{}", clean), false)
                             } else if use_structured_params {
@@ -1639,7 +1612,7 @@ fn generate_conditional_function_body(
                         // Nested conditional blocks are not produced for plain
                         // conditional queries (only the mixed choice path uses
                         // nesting), so there is nothing to emit here.
-                        SqlToken::Block { .. } => {}
+                        SqlToken::Block(_) => {}
                     }
                 }
 
@@ -1988,7 +1961,7 @@ pub fn generate_code_for_module(
         // Handle conditions_type struct
         if let Some(struct_name) = query.conditions_type.get_struct_name() {
             if !generated_structs.contains_key(struct_name) {
-                let param_names = parse_parameter_names_from_sql(&query.sql);
+                let param_names = query.tree.param_names();
                 let mut fields = Vec::new();
                 for (i, param_name) in param_names.iter().enumerate() {
                     if param_name.ends_with('?') {
@@ -2007,7 +1980,7 @@ pub fn generate_code_for_module(
                 }
                 generated_structs.insert(struct_name.to_string(), fields);
             } else {
-                let param_names = parse_parameter_names_from_sql(&query.sql);
+                let param_names = query.tree.param_names();
                 let conditional_param_names: Vec<String> = param_names
                     .iter()
                     .filter(|p| p.ends_with('?'))
@@ -2029,9 +2002,9 @@ pub fn generate_code_for_module(
                     true,
                 )?;
             }
-        } else if query.conditions_type.is_enabled() && type_info.parsed_sql.is_some() {
+        } else if query.conditions_type.is_enabled() && query.tree.top_block_count() > 0 {
             let struct_name = format!("{}Params", to_pascal_case(&query.name));
-            let param_names = parse_parameter_names_from_sql(&query.sql);
+            let param_names = query.tree.param_names();
             let mut fields = Vec::new();
             for (i, param_name) in param_names.iter().enumerate() {
                 if param_name.ends_with('?') {
@@ -2054,7 +2027,7 @@ pub fn generate_code_for_module(
         // Handle parameters_type struct
         if let Some(struct_name) = query.parameters_type.get_struct_name() {
             if !generated_structs.contains_key(struct_name) {
-                let param_names = parse_parameter_names_from_sql(&query.sql);
+                let param_names = query.tree.param_names();
                 let mut fields = Vec::new();
                 for (i, param_name) in param_names.iter().enumerate() {
                     let clean_param = param_name.trim_end_matches('?');
@@ -2071,7 +2044,7 @@ pub fn generate_code_for_module(
                 }
                 generated_structs.insert(struct_name.to_string(), fields);
             } else {
-                let param_names = parse_parameter_names_from_sql(&query.sql);
+                let param_names = query.tree.param_names();
                 validate_struct_reference(
                     struct_name,
                     &param_names,
@@ -2082,7 +2055,7 @@ pub fn generate_code_for_module(
             }
         } else if query.parameters_type.is_enabled() {
             let struct_name = format!("{}Params", to_pascal_case(&query.name));
-            let param_names = parse_parameter_names_from_sql(&query.sql);
+            let param_names = query.tree.param_names();
             let mut fields = Vec::new();
             for (i, param_name) in param_names.iter().enumerate() {
                 let clean_param = param_name.trim_end_matches('?');

@@ -2,6 +2,7 @@ mod codegen;
 mod query_definition;
 mod query_definition_rt;
 mod rust_type;
+mod sql_tree;
 mod sqlfile_parser;
 mod types_extractor;
 mod utils;
@@ -578,11 +579,15 @@ impl AutoModel {
                 println!("cargo:info=Analyzing query '{}'", query.name);
 
                 // Extract type information (captures Statement for later TypeSystem building)
+                let explain_variants = query.tree.explain_variants();
+                let template = query.tree.template();
+                let non_null_columns = query.tree.non_null_columns();
                 let type_info = extract_query_types(
                     client,
-                    &query.sql,
-                    &query.explain_variants,
+                    &template,
+                    &explain_variants,
                     query.types.as_ref(),
+                    &non_null_columns,
                 )
                 .await?;
 
@@ -620,7 +625,8 @@ impl AutoModel {
         query: &QueryDefinition,
     ) -> Result<QueryAnalysisResult> {
         // Quick keyword-based detection first
-        let sql_upper = query.sql.to_uppercase();
+        let template = query.tree.template();
+        let sql_upper = template.to_uppercase();
         let sql_trimmed = sql_upper.trim();
 
         let mutation_keywords = [
@@ -635,10 +641,11 @@ impl AutoModel {
         if is_obvious_mutation {
             // This is clearly a mutation - extract constraints
             // Use first variant (base query) for constraint extraction
-            let (converted_sql, _param_names, _label) = &query.sql_variants[0];
+            let query_variants = query.tree.query_variants();
+            let (converted_sql, _param_names, _label) = &query_variants[0];
             let constraints = match client.prepare(converted_sql).await {
                 Ok(statement) => {
-                    match extract_constraints_from_statement(client, &statement, &query.sql).await {
+                    match extract_constraints_from_statement(client, &statement, &template).await {
                         Ok(constraints) => constraints,
                         Err(_e) => {
                             // Silently skip constraint extraction errors
@@ -665,7 +672,8 @@ impl AutoModel {
 
         // Pre-compute EXPLAIN parameters for all variants
         let mut explain_params = Vec::new();
-        for (converted_sql, param_names, _variant_label) in &query.explain_variants {
+        let explain_variants = query.tree.explain_variants();
+        for (converted_sql, param_names, _variant_label) in &explain_variants {
             if param_names.is_empty() {
                 explain_params.push(None);
             } else {
@@ -728,15 +736,16 @@ impl AutoModel {
         query: &QueryDefinition,
         explain_params: &[Option<ExplainParams>],
     ) -> Result<PerformanceAnalysis> {
+        let explain_variants = query.tree.explain_variants();
         // Use first variant (all ungrouped blocks + first branch of each group)
-        let (_converted_sql, param_names, _label) = &query.explain_variants[0];
+        let (_converted_sql, param_names, _label) = &explain_variants[0];
 
         // Try EXPLAIN with pre-computed parameters
         let explain_result = if !param_names.is_empty() {
             if let Some(params) = &explain_params[0] {
                 if params.special_params.is_empty() {
                     // No special params, use dummy params for all parameters
-                    let (converted_sql, _param_names, _label) = &query.explain_variants[0];
+                    let (converted_sql, _param_names, _label) = &explain_variants[0];
                     match client.prepare(converted_sql).await {
                         Ok(statement) => {
                             let param_types = statement.params();
@@ -751,7 +760,7 @@ impl AutoModel {
                 } else {
                     // Has special params - some are inlined, others need dummy values
                     // Prepare to get param types for non-special params
-                    let (converted_sql, _param_names, _label) = &query.explain_variants[0];
+                    let (converted_sql, _param_names, _label) = &explain_variants[0];
                     match client.prepare(converted_sql).await {
                         Ok(statement) => {
                             let param_types = statement.params();
@@ -781,7 +790,7 @@ impl AutoModel {
             }
         } else {
             // No parameters, execute directly
-            let (converted_sql, _, _) = &query.explain_variants[0];
+            let (converted_sql, _, _) = &explain_variants[0];
             let explain_sql = format!("EXPLAIN (FORMAT TEXT, ANALYZE false) {}", converted_sql);
             client.query(&explain_sql, &[]).await
         };
@@ -921,10 +930,10 @@ impl AutoModel {
         //   combined with exactly one branch per group) which is the only set
         //   that keeps mutually-exclusive branches as valid, separately-prepared
         //   SQL.
-        let plan_variants = if query.choice_groups.is_empty() {
-            &query.sql_variants
+        let plan_variants = if query.tree.derive_choice_groups()?.is_empty() {
+            query.tree.query_variants()
         } else {
-            &query.explain_variants
+            query.tree.explain_variants()
         };
 
         for (i, (converted_sql, param_names, variant_label)) in plan_variants.iter().enumerate() {
