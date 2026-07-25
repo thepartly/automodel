@@ -71,19 +71,29 @@ impl<C: TryFrom<ErrorConstraintInfo>> From<sqlx::Error> for Error<C> {
             sqlx::Error::ColumnNotFound(col) => {
                 Self::InternalError(format!("Column not found: {}", col), error)
             }
-            sqlx::Error::Database(db_err) => {
-                // Extract constraint name and table from error
-                let constraint_name = db_err.constraint().unwrap_or("").to_string();
-                let table_name = db_err.table().unwrap_or("").to_string();
-                let kind = db_err.kind();
+            sqlx::Error::Database(db_err) => match db_err.kind() {
+                sqlx::error::ErrorKind::UniqueViolation
+                | sqlx::error::ErrorKind::ForeignKeyViolation
+                | sqlx::error::ErrorKind::NotNullViolation
+                | sqlx::error::ErrorKind::CheckViolation => {
+                    // Extract constraint name and table from error
+                    let constraint_name = db_err.constraint().unwrap_or("").to_string();
+                    let table_name = db_err.table().unwrap_or("").to_string();
+                    let kind = db_err.kind();
 
-                let violation = ErrorConstraintInfo {
-                    constraint_name,
-                    table_name,
-                    kind: kind.into(),
-                };
-                Self::ConstraintViolation(violation.clone().try_into().ok(), violation)
-            }
+                    let violation = ErrorConstraintInfo {
+                        constraint_name,
+                        table_name,
+                        kind: kind.into(),
+                    };
+                    Self::ConstraintViolation(violation.clone().try_into().ok(), violation)
+                }
+                // Any other database error (syntax error, undefined column, type
+                // mismatch, serialization failure, deadlock, etc.) is NOT a
+                // constraint violation. Preserve the real Postgres error instead
+                // of masking it as an empty `ConstraintViolation`.
+                _ => Self::InternalError(db_err.to_string(), error),
+            },
             sqlx::Error::Configuration(_) => {
                 Self::InternalError("Configuration error".to_string(), error)
             }
