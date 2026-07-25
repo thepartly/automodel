@@ -177,10 +177,8 @@ pub struct GetOrdersByTenantRangeItem {
 ///               Recheck Cond: (tenant_id > 0)
 ///               ->  Bitmap Index Scan on orders_p1_pkey
 ///                     Index Cond: (tenant_id > 0)
-///         ->  Bitmap Heap Scan on orders_p2 orders_3
-///               Recheck Cond: (tenant_id > 0)
-///               ->  Bitmap Index Scan on orders_p2_pkey
-///                     Index Cond: (tenant_id > 0)
+///         ->  Index Scan using orders_p2_pkey on orders_p2 orders_3
+///               Index Cond: (tenant_id > 0)
 ///         ->  Bitmap Heap Scan on orders_p3 orders_4
 ///               Recheck Cond: (tenant_id > 0)
 ///               ->  Bitmap Index Scan on orders_p3_pkey

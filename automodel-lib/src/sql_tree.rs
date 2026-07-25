@@ -169,8 +169,9 @@ pub(crate) enum Gate {
         params: Vec<String>,
     },
     /// One branch of a mutually-exclusive choice: included when the generated
-    /// `selector` argument equals `variant`. `required` mirrors the `!`/`?`
-    /// marker (`!` = a branch must be chosen, `?` = the group is optional).
+    /// `selector` argument equals `variant`. `required` mirrors the optionality
+    /// marker (no marker = a branch must be chosen, `?` = the group is
+    /// optional).
     Choice {
         selector: String,
         variant: String,
@@ -190,7 +191,7 @@ impl SqlTree {
     ///
     /// Directive handling mirrors the legacy parser exactly: `#[...]` becomes a
     /// [`Block`] (honoring bracket nesting); a block whose content starts with a
-    /// `#{selector=variant!}` / `?` directive gets a [`Gate::Choice`] and has the
+    /// `#{selector=variant}` / `?` directive gets a [`Gate::Choice`] and has the
     /// directive stripped (and the remainder `trim_start`ed) from its body, while
     /// every other block gets [`Gate::Optional`]; `#{name}` becomes a
     /// [`SqlToken::Param`] (empty `#{}` is dropped); a `{col!}` / `"col!"` cast
@@ -370,7 +371,8 @@ impl SqlTree {
 
     /// Derive the mutually-exclusive choice groups declared in the tree, applying
     /// the same validations as the legacy `extract_choice_groups`: consistent
-    /// `!`/`?` marker per selector, and no parameter shared across two groups.
+    /// optionality (`?` or no marker) per selector, and no parameter shared
+    /// across two groups.
     /// Returns groups in first-seen selector order (empty when there are none).
     pub(crate) fn derive_choice_groups(&self) -> Result<Vec<ChoiceGroup>> {
         let mut selector_order: Vec<String> = Vec::new();
@@ -391,7 +393,7 @@ impl SqlTree {
                 Some(existing) if *existing != *required => {
                     bail!(
                         "Choice-group selector '{}' has conflicting optionality markers \
-                         ('?' vs '!'); all branches must use the same marker",
+                         (optional '?' vs required); all branches must use the same marker",
                         selector
                     );
                 }
@@ -915,7 +917,7 @@ fn to_positional(sql: &str) -> (String, Vec<String>) {
 /// A single branch within a mutually-exclusive choice group.
 ///
 /// Each branch corresponds to one conditional `#[...]` block that was tagged
-/// with a selector directive `#{selector=variant!}` / `#{selector=variant?}`.
+/// with a selector directive `#{selector=variant}` / `#{selector=variant?}`.
 #[derive(Debug, Clone)]
 pub(crate) struct ChoiceVariant {
     /// Variant name from the selector directive (e.g. "ua_asc").
@@ -961,15 +963,15 @@ pub(crate) struct NestedChoiceBlock {
     pub params: Vec<String>,
 }
 
-/// A mutually-exclusive choice group: exactly one branch (`!`, required) or at
-/// most one branch (`?`, optional) is selected at runtime via a generated enum
+/// A mutually-exclusive choice group: exactly one branch (required) or at most
+/// one branch (`?`, optional) is selected at runtime via a generated enum
 /// argument. Declared in SQL by prefixing each alternative conditional block
-/// with `#{selector=variant!}` (or `?`).
+/// with `#{selector=variant}` (append `?` for an optional group).
 #[derive(Debug, Clone)]
 pub(crate) struct ChoiceGroup {
     /// Selector name (e.g. "sort") — becomes the generated enum argument name.
     pub selector: String,
-    /// `true` if a branch must be chosen (`!` marker) → `selector: Enum`.
+    /// `true` if a branch must be chosen (no marker) → `selector: Enum`.
     /// `false` if the group is optional (`?` marker) → `selector: Option<Enum>`.
     pub required: bool,
     /// Branches in source order.
@@ -983,9 +985,10 @@ pub(crate) struct ChoiceGroup {
 // `sqlfile_parser` reuses them via `crate::sql_tree::*`.
 // ===========================================================================
 
-/// Parse a selector directive `#{selector=variant!}` / `#{selector=variant?}`
-/// at the very start (after optional whitespace) of a conditional block's
-/// content. Returns `(selector, variant, required, directive_char_len)` where
+/// Parse a selector directive `#{selector=variant}` / `#{selector=variant?}` at
+/// the very start (after optional whitespace) of a conditional block's content.
+/// A plain directive (no marker) makes the group required; a `?` marker makes it
+/// optional. Returns `(selector, variant, required, directive_char_len)` where
 /// `directive_char_len` is the number of characters from the start of
 /// `block_content` up to and including the closing `}` (so callers can strip it).
 pub(crate) fn parse_selector_directive(
@@ -1003,13 +1006,14 @@ pub(crate) fn parse_selector_directive(
     let inner_end = rest.find('}')?;
     let inner = &rest[2..inner_end]; // between "#{" and "}"
 
-    // Must be of the form: IDENT '=' IDENT ('!' | '?')
-    let (body, required) = if let Some(stripped) = inner.strip_suffix('!') {
-        (stripped, true)
-    } else if let Some(stripped) = inner.strip_suffix('?') {
+    // Must be of the form: IDENT '=' IDENT ('?')? — a plain directive is required,
+    // a trailing `?` makes the group optional. The `=` is what distinguishes a
+    // selector directive from a plain parameter, so a marker-less directive never
+    // collides with ordinary `#{name}` / `#{name?}`.
+    let (body, required) = if let Some(stripped) = inner.strip_suffix('?') {
         (stripped, false)
     } else {
-        return None;
+        (inner, true)
     };
     let (selector, variant) = body.split_once('=')?;
     let selector = selector.trim();
@@ -1111,4 +1115,40 @@ pub(crate) fn is_rust_keyword(name: &str) -> bool {
             | "yield"
             | "try"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selector_directive_defaults_to_required() {
+        let (selector, variant, required, _len) =
+            parse_selector_directive("#{referrer=on} r").expect("should parse without marker");
+        assert_eq!(selector, "referrer");
+        assert_eq!(variant, "on");
+        assert!(required, "missing marker must default to required");
+    }
+
+    #[test]
+    fn selector_directive_optional_marker() {
+        let (_, _, required, _) =
+            parse_selector_directive("#{sort=asc?} ORDER BY id").expect("`?` parses");
+        assert!(!required);
+    }
+
+    #[test]
+    fn selector_directive_bang_marker_not_supported() {
+        // The `!` marker is no longer recognized: `asc!` is not a valid Rust
+        // identifier, so the directive fails to parse and the block is treated
+        // as an ordinary additive block instead.
+        assert!(parse_selector_directive("#{sort=asc!} ORDER BY id").is_none());
+    }
+
+    #[test]
+    fn plain_params_are_not_selector_directives() {
+        // A plain optional param has no `=`, so it is never a selector directive.
+        assert!(parse_selector_directive("#{category?} IS NULL").is_none());
+        assert!(parse_selector_directive("#{name} = 'x'").is_none());
+    }
 }

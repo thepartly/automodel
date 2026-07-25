@@ -5,7 +5,7 @@
 SELECT id, name, email, age, is_active
 FROM public.users
 WHERE name LIKE #{name_prefix}
-  #[#{filter=by_active!} AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]
-  #[#{filter=by_age!}    AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]
+  #[#{filter=by_active} AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]
+  #[#{filter=by_age}    AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]
 ORDER BY id ASC
 LIMIT #{lim};

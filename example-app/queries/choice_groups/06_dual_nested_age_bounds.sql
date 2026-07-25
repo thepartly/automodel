@@ -5,6 +5,6 @@
 SELECT id, name, email, age
 FROM public.users
 WHERE name LIKE #{name_prefix}
-  #[#{sort=asc!}  #[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]
-  #[#{sort=desc!} #[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]
+  #[#{sort=asc}  #[AND age >= #{asc_min_age?}]  #[AND age <= #{asc_max_age?}]  ORDER BY age ASC,  id ASC]
+  #[#{sort=desc} #[AND age >= #{desc_min_age?}] #[AND age <= #{desc_max_age?}] ORDER BY age DESC, id DESC]
 LIMIT #{lim};

@@ -784,13 +784,7 @@ fn generate_function_body(
     // Check if this query has conditional blocks
     if query.tree.top_block_count() > 0 {
         // Generate dynamic SQL building for conditional queries
-        generate_conditional_function_body(
-            &mut body,
-            query,
-            type_info,
-            return_type,
-            defaults,
-        )?;
+        generate_conditional_function_body(&mut body, query, type_info, return_type, defaults)?;
     } else {
         // Generate standard static SQL
         generate_static_function_body(&mut body, query, type_info, return_type, defaults)?;
@@ -967,7 +961,7 @@ fn generate_static_function_body(
 
 // ===== Mutually-exclusive choice groups =====
 // A choice group compiles a set of alternative conditional blocks (each tagged
-// `#{selector=variant!}` / `?`) into a single generated enum argument, so the
+// `#{selector=variant}` / `?`) into a single generated enum argument, so the
 // caller picks exactly one branch and the type system makes any other
 // combination unrepresentable.
 

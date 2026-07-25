@@ -7,6 +7,6 @@ FROM public.users
 WHERE email LIKE #{email_prefix}
   #[AND age >= #{min_age?}]
   #[AND age <= #{max_age?}]
-#[#{sort=unsorted!} LIMIT 100]
-#[#{sort=age_asc!} ORDER BY age ASC, id ASC LIMIT #{limit?}]
-#[#{sort=age_desc!} ORDER BY age DESC, id DESC LIMIT #{limit?}]
+#[#{sort=unsorted} LIMIT 100]
+#[#{sort=age_asc} ORDER BY age ASC, id ASC LIMIT #{limit?}]
+#[#{sort=age_desc} ORDER BY age DESC, id DESC LIMIT #{limit?}]

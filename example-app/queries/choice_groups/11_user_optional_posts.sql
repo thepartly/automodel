@@ -5,9 +5,9 @@
 SELECT
   u.id,
   u.name,
-  #[#{posts=on!} array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)]#[#{posts=off!} NULL] AS posts
+  #[#{posts=on} array_agg(p ORDER BY p.id) FILTER (WHERE p.id IS NOT NULL)]#[#{posts=off} NULL] AS posts
 FROM public.users u
-#[#{posts=on!} LEFT JOIN public.posts p ON p.author_id = u.id]
+#[#{posts=on} LEFT JOIN public.posts p ON p.author_id = u.id]
 WHERE u.email LIKE #{email_prefix}
-#[#{posts=on!} GROUP BY u.id, u.name]
+#[#{posts=on} GROUP BY u.id, u.name]
 ORDER BY u.id

@@ -5,8 +5,8 @@
 SELECT
   u.id,
   u.name,
-  #[#{referrer=on!} r.age]#[#{referrer=off!} NULL] AS referrer_age
+  #[#{referrer=on} r.age]#[#{referrer=off} NULL] AS referrer_age
 FROM public.users u
-#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+#[#{referrer=on} LEFT JOIN public.users r ON r.id = u.referrer_id]
 WHERE u.email LIKE #{email_prefix}
 ORDER BY u.id

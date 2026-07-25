@@ -7,5 +7,5 @@ FROM public.users
 WHERE email LIKE #{email_prefix}
   #[#{range=min?} AND age >= #{min_age?}]
   #[#{range=max?} AND age <= #{max_age?}]
-#[#{sort=asc!} ORDER BY id ASC LIMIT #{lim?}]
-#[#{sort=desc!} ORDER BY id DESC LIMIT #{lim?}]
+#[#{sort=asc} ORDER BY id ASC LIMIT #{lim?}]
+#[#{sort=desc} ORDER BY id DESC LIMIT #{lim?}]

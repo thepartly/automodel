@@ -5,9 +5,9 @@
 SELECT
   u.id,
   u.name,
-  #[#{referrer=on!} r]#[#{referrer=off!} NULL] AS referrer,
-  #[#{posts=on!} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off!} NULL] AS posts
+  #[#{referrer=on} r]#[#{referrer=off} NULL] AS referrer,
+  #[#{posts=on} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off} NULL] AS posts
 FROM public.users u
-#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+#[#{referrer=on} LEFT JOIN public.users r ON r.id = u.referrer_id]
 WHERE u.email LIKE #{email_prefix}
 ORDER BY u.id

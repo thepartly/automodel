@@ -5,5 +5,5 @@
 SELECT id, name, email
 FROM public.users
 WHERE email LIKE #{email_prefix}
-#[#{sort=asc!} ORDER BY id ASC LIMIT #{page?}]
-#[#{sort=desc!} ORDER BY id DESC LIMIT #{page?}]
+#[#{sort=asc} ORDER BY id ASC LIMIT #{page?}]
+#[#{sort=desc} ORDER BY id DESC LIMIT #{page?}]

@@ -501,13 +501,13 @@ Additive [conditional blocks](#conditional-queries) (`#[ ... ]`) are AND-combine
 A choice block starts with a directive as its very first token:
 
 ```
-#[#{selector=variant!} ...sql...]     -- required: arg is `selector: Enum`
+#[#{selector=variant}  ...sql...]     -- required: arg is `selector: Enum`
 #[#{selector=variant?} ...sql...]     -- optional: arg is `selector: Option<Enum>`
 ```
 
 - `selector` is the shared group name (same across all branches) and becomes the function argument name.
 - `variant` is the branch name and becomes an enum variant.
-- The trailing marker is mandatory: `!` makes the choice required, `?` makes it optional (where `None` selects the base query with all blocks removed).
+- The trailing marker is optional: no marker makes the choice required, `?` makes it optional (where `None` selects the base query with all blocks removed).
 
 Example — keyset pagination over four mutually-exclusive sort modes:
 
@@ -519,10 +519,10 @@ Example — keyset pagination over four mutually-exclusive sort modes:
 SELECT id, name, email, updated_at
 FROM users
 WHERE 1 = 1
-#[#{sort=ua_asc!}   AND (updated_at, id) > (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at ASC,  id ASC  LIMIT #{page_size?}]
-#[#{sort=ua_desc!}  AND (updated_at, id) < (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at DESC, id DESC LIMIT #{page_size?}]
-#[#{sort=name_asc!}                                                        ORDER BY name ASC,       id ASC  LIMIT #{page_size?}]
-#[#{sort=name_desc!}                                                       ORDER BY name DESC,      id DESC LIMIT #{page_size?}]
+#[#{sort=ua_asc}   AND (updated_at, id) > (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at ASC,  id ASC  LIMIT #{page_size?}]
+#[#{sort=ua_desc}  AND (updated_at, id) < (#{cursor_ts?}, #{cursor_id?}) ORDER BY updated_at DESC, id DESC LIMIT #{page_size?}]
+#[#{sort=name_asc}                                                        ORDER BY name ASC,       id ASC  LIMIT #{page_size?}]
+#[#{sort=name_desc}                                                       ORDER BY name DESC,      id DESC LIMIT #{page_size?}]
 ```
 
 This generates an enum and a single `sort` argument:
@@ -561,7 +561,7 @@ let page = get_users_multi_sort_cursor(
 - A choice group may **coexist with additive `#[...]` blocks** in the same query (see below); blocks without a directive keep their additive `Option<T>` behavior.
 - A branch may contain **nested additive `#[...]` blocks** (see below); their parameters become `Option<T>` fields, included only when `Some(...)`.
 - A single branch may **span multiple blocks** (see below): repeat its directive on each fragment that must switch together — e.g. an output column and its matching `JOIN` — and they are included or dropped as a unit.
-- All branches of a group must use the **same** optionality marker (`!` or `?`).
+- All branches of a group must use the **same** optionality (all required, or all `?`).
 - Variant names within a group must be unique.
 - A parameter may belong to **at most one** choice group (it cannot be shared across two different groups).
 
@@ -574,9 +574,9 @@ SELECT id, name, email FROM users
 WHERE id >= #{min_id}
   #[AND name LIKE #{name_starts_with?}]   -- additive: Option<String> argument
   #[AND age >= #{age_from?}]              -- additive: Option<i32> argument
-#[#{sort=unsorted!}  LIMIT #{limit?}]
-#[#{sort=name_asc!}  ORDER BY name ASC,  id ASC  LIMIT #{limit?}]
-#[#{sort=name_desc!} ORDER BY name DESC, id DESC LIMIT #{limit?}]
+#[#{sort=unsorted}  LIMIT #{limit?}]
+#[#{sort=name_asc}  ORDER BY name ASC,  id ASC  LIMIT #{limit?}]
+#[#{sort=name_desc} ORDER BY name DESC, id DESC LIMIT #{limit?}]
 ```
 
 Here the additive filters stay optional and combine freely, while `sort` is a required enum picking exactly one ordering. Because `limit` is referenced inside every branch, each variant carries its own `limit` field:
@@ -597,7 +597,7 @@ pub async fn search_users(
 ) -> Result<Vec<SearchUsersItem>, /* ... */> { /* ... */ }
 ```
 
-When mixing, every parameter referenced inside a branch becomes a per-variant field on that branch. A branch may also carry **no** parameters at all (e.g. `#[#{sort=unsorted!} LIMIT 100]` with a hardcoded limit), in which case it generates a plain unit variant.
+When mixing, every parameter referenced inside a branch becomes a per-variant field on that branch. A branch may also carry **no** parameters at all (e.g. `#[#{sort=unsorted} LIMIT 100]` with a hardcoded limit), in which case it generates a plain unit variant.
 
 #### Multiple choice groups in one query
 
@@ -608,11 +608,11 @@ SELECT id, name, email, age FROM users
 WHERE email LIKE #{email_prefix}
   #[#{range=min?} AND age >= #{min_age?}]
   #[#{range=max?} AND age <= #{max_age?}]
-#[#{sort=asc!}  ORDER BY id ASC  LIMIT #{lim?}]
-#[#{sort=desc!} ORDER BY id DESC LIMIT #{lim?}]
+#[#{sort=asc}  ORDER BY id ASC  LIMIT #{lim?}]
+#[#{sort=desc} ORDER BY id DESC LIMIT #{lim?}]
 ```
 
-`range` is optional (`?`, so `None` applies no age bound) and each branch carries its own field, while `sort` is required (`!`) and shares `lim` across both branches:
+`range` is optional (`?`, so `None` applies no age bound) and each branch carries its own field, while `sort` is required and shares `lim` across both branches:
 
 ```rust
 pub enum MultiGroupSearchRange { Min { min_age: i32 }, Max { max_age: i32 } }
@@ -667,8 +667,8 @@ A single branch may hold **several independent nested blocks**, and nested block
 ```sql
 SELECT id, name, email, age, is_active FROM users
 WHERE name LIKE #{name_prefix}
-  #[#{filter=by_active!} AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]
-  #[#{filter=by_age!}    AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]
+  #[#{filter=by_active} AND is_active = #{want_active} #[AND age >= #{active_min_age?}]]
+  #[#{filter=by_age}    AND age >= #{floor_age}        #[AND age <= #{ceil_age?}]]
 LIMIT #{lim};
 ```
 
@@ -685,7 +685,7 @@ Here `want_active` / `floor_age` are always bound (plain fields), while `active_
 
 The examples above vary *how a query filters and sorts*. The same selector mechanism can also vary **what a query returns** — including or omitting an output column, a `JOIN`, or a whole nested entity — while keeping the **result shape fixed** (every branch produces the same columns, so no per-branch row mapping is needed).
 
-The enabler is that one branch may **span several blocks**: repeat the *same* `#{selector=variant!}` directive on each fragment that must switch together. AutoModel merges them into a single branch, so a projection fragment and its matching `JOIN` are included or dropped as a unit.
+The enabler is that one branch may **span several blocks**: repeat the *same* `#{selector=variant}` directive on each fragment that must switch together. AutoModel merges them into a single branch, so a projection fragment and its matching `JOIN` are included or dropped as a unit.
 
 **Conditional column + coordinated join.** A caller flag decides whether each row also carries a value from a self-join; when off, the `LEFT JOIN` is skipped entirely and the column comes back `NULL`:
 
@@ -693,9 +693,9 @@ The enabler is that one branch may **span several blocks**: repeat the *same* `#
 SELECT
   u.id,
   u.name,
-  #[#{referrer=on!} r.age]#[#{referrer=off!} NULL] AS referrer_age
+  #[#{referrer=on} r.age]#[#{referrer=off} NULL] AS referrer_age
 FROM public.users u
-#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+#[#{referrer=on} LEFT JOIN public.users r ON r.id = u.referrer_id]
 WHERE u.email LIKE #{email_prefix}
 ORDER BY u.id
 ```
@@ -718,9 +718,9 @@ pub async fn user_optional_referrer(
 
 ```sql
 SELECT u.id, u.name,
-  #[#{referrer=on!} r]#[#{referrer=off!} NULL] AS referrer
+  #[#{referrer=on} r]#[#{referrer=off} NULL] AS referrer
 FROM public.users u
-#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+#[#{referrer=on} LEFT JOIN public.users r ON r.id = u.referrer_id]
 WHERE u.email LIKE #{email_prefix}
 -- referrer: Option<types::public::Users>
 ```
@@ -729,7 +729,7 @@ WHERE u.email LIKE #{email_prefix}
 
 ```sql
 SELECT u.id, u.name,
-  #[#{posts=on!} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off!} NULL] AS posts
+  #[#{posts=on} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off} NULL] AS posts
 FROM public.users u
 WHERE u.email LIKE #{email_prefix}
 -- posts: Option<Vec<types::public::Posts>>
@@ -739,10 +739,10 @@ WHERE u.email LIKE #{email_prefix}
 
 ```sql
 SELECT u.id, u.name,
-  #[#{referrer=on!} r]#[#{referrer=off!} NULL] AS referrer,
-  #[#{posts=on!} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off!} NULL] AS posts
+  #[#{referrer=on} r]#[#{referrer=off} NULL] AS referrer,
+  #[#{posts=on} (SELECT array_agg(p ORDER BY p.id) FROM public.posts p WHERE p.author_id = u.id)]#[#{posts=off} NULL] AS posts
 FROM public.users u
-#[#{referrer=on!} LEFT JOIN public.users r ON r.id = u.referrer_id]
+#[#{referrer=on} LEFT JOIN public.users r ON r.id = u.referrer_id]
 WHERE u.email LIKE #{email_prefix}
 -- args: referrer: ...Referrer, posts: ...Posts  (two independent enums)
 ```

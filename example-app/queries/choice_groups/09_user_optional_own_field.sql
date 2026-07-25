@@ -5,7 +5,7 @@
 SELECT
   u.id,
   u.name,
-  #[#{age=on!} u.age]#[#{age=off!} NULL] AS maybe_age
+  #[#{age=on} u.age]#[#{age=off} NULL] AS maybe_age
 FROM public.users u
 WHERE u.email LIKE #{email_prefix}
 ORDER BY u.id
