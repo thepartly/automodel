@@ -931,61 +931,19 @@ fn generate_static_function_body(
                 }
             }
         } else if use_structured_params {
-            // For parameters_type, bind from params struct
+            // For parameters_type, bind from the params struct.
             for (i, name) in param_names.iter().enumerate() {
                 let clean_name = if name.ends_with('?') {
                     name.trim_end_matches('?').to_string()
                 } else {
                     name.clone()
                 };
-
-                let rust_type_info = &type_info.input_types[i];
-                let param_type = rust_type_info.rust_type();
-
-                // Check if this is a custom type that needs JSON serialization
-                if rust_type_info.needs_json_wrapper {
-                    if rust_type_info.is_pg_array() {
-                        // For jsonb[] columns: serialize each element individually
-                        body.push_str(&format!(
-                            "    let {}_json: Vec<Option<serde_json::Value>> = params.{}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n",
-                            clean_name, clean_name
-                        ));
-                        body.push_str(&format!(
-                            "    let query = query.bind({}_json);\n",
-                            clean_name
-                        ));
-                    } else if rust_type_info.is_optional {
-                        // so that None becomes SQL NULL rather than JSON null
-                        body.push_str(&format!(
-                            "    let query = query.bind(params.{}.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n",
-                            clean_name
-                        ));
-                    } else {
-                        // For custom types, serialize to JSON before binding
-                        body.push_str(&format!(
-                            "    let query = query.bind(serde_json::to_value(&params.{}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n", 
-                            clean_name
-                        ));
-                    }
-                } else if param_type == "String" {
-                    // Use reference for String parameters to avoid move issues
-                    body.push_str(&format!(
-                        "    let query = query.bind(&params.{});\n",
-                        clean_name
-                    ));
-                } else if rust_type_info.is_nullable {
-                    // For Option types, we can bind directly
-                    body.push_str(&format!(
-                        "    let query = query.bind(params.{});\n",
-                        clean_name
-                    ));
-                } else {
-                    // For Copy types, we can bind directly
-                    body.push_str(&format!(
-                        "    let query = query.bind(params.{});\n",
-                        clean_name
-                    ));
-                }
+                emit_static_bind(
+                    body,
+                    &type_info.input_types[i],
+                    &format!("params.{}", clean_name),
+                    &clean_name,
+                );
             }
         } else if param_names.is_empty() {
             // Fallback to generic param names
@@ -993,45 +951,10 @@ fn generate_static_function_body(
                 body.push_str(&format!("    let query = query.bind(param_{});\n", i));
             }
         } else {
-            // Use meaningful parameter names from SQL
+            // Use meaningful parameter names from SQL.
             for (i, name) in param_names.iter().enumerate() {
                 let clean_name = strip_input_suffix(name);
-
-                let rust_type_info = &type_info.input_types[i];
-                let param_type = rust_type_info.rust_type();
-
-                // Check if this is a custom type that needs JSON serialization
-                if rust_type_info.needs_json_wrapper {
-                    if rust_type_info.is_pg_array() {
-                        // For jsonb[] columns: serialize each element individually
-                        body.push_str(&format!(
-                            "    let {}_json: Vec<Option<serde_json::Value>> = {}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n",
-                            clean_name, clean_name
-                        ));
-                        body.push_str(&format!(
-                            "    let query = query.bind({}_json);\n",
-                            clean_name
-                        ));
-                    } else if rust_type_info.is_optional {
-                        // For optional custom types, map through Option to produce Option<serde_json::Value>
-                        // so that None becomes SQL NULL rather than JSON null
-                        body.push_str(&format!(
-                            "    let query = query.bind({}.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n",
-                            clean_name
-                        ));
-                    } else {
-                        // For custom types, serialize to JSON before binding
-                        body.push_str(&format!(
-                            "    let query = query.bind(serde_json::to_value(&{}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n", 
-                            clean_name
-                        ));
-                    }
-                } else if param_type == "String" {
-                    // Use reference for String parameters to avoid move issues
-                    body.push_str(&format!("    let query = query.bind(&{});\n", clean_name));
-                } else {
-                    body.push_str(&format!("    let query = query.bind({});\n", clean_name));
-                }
+                emit_static_bind(body, &type_info.input_types[i], &clean_name, &clean_name);
             }
         }
     }
@@ -1269,7 +1192,12 @@ fn emit_choice_group_block_tokens(
                 body.push_str(&format!("{}if {}.is_some() {{\n", indent, gate));
                 let inner_indent = format!("{}    ", indent);
                 emit_choice_group_block_tokens(
-                    body, inner, &inner_indent, false, all_params, type_info,
+                    body,
+                    inner,
+                    &inner_indent,
+                    false,
+                    all_params,
+                    type_info,
                 );
                 body.push_str(&format!("{}}}\n", indent));
             }
@@ -1377,16 +1305,37 @@ fn generate_choice_group_function_body(
                         format!("Some({})", pattern)
                     };
                     body.push_str(&format!("    if let {} = &{} {{\n", arm, group.selector));
-                    emit_choice_group_block_tokens(body, &inner, "        ", true, &all_params, type_info);
+                    emit_choice_group_block_tokens(
+                        body,
+                        &inner,
+                        "        ",
+                        true,
+                        &all_params,
+                        type_info,
+                    );
                     body.push_str("    }\n");
                 } else if block.parameters.is_empty() {
                     // Additive block with no parameters: always included.
-                    emit_choice_group_block_tokens(body, &inner, "    ", false, &all_params, type_info);
+                    emit_choice_group_block_tokens(
+                        body,
+                        &inner,
+                        "    ",
+                        false,
+                        &all_params,
+                        type_info,
+                    );
                 } else {
                     // Additive block: gated by its first parameter's presence.
                     let gate = block.parameters[0].trim_end_matches('?');
                     body.push_str(&format!("    if {}.is_some() {{\n", gate));
-                    emit_choice_group_block_tokens(body, &inner, "        ", false, &all_params, type_info);
+                    emit_choice_group_block_tokens(
+                        body,
+                        &inner,
+                        "        ",
+                        false,
+                        &all_params,
+                        type_info,
+                    );
                     body.push_str("    }\n");
                 }
             }
@@ -1534,7 +1483,11 @@ fn emit_push_bind(
                 "{i}let {t}_json: Vec<Option<serde_json::Value>> = {o}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n",
                 i = indent, t = tmp, o = owner
             ));
-            body.push_str(&format!("{i}qb.push_bind({t}_json);\n", i = indent, t = tmp));
+            body.push_str(&format!(
+                "{i}qb.push_bind({t}_json);\n",
+                i = indent,
+                t = tmp
+            ));
         } else {
             body.push_str(&format!(
                 "{i}qb.push_bind(serde_json::to_value(&{o}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n",
@@ -1549,6 +1502,44 @@ fn emit_push_bind(
             a = amp,
             o = owner
         ));
+    }
+}
+
+/// Emit a single `let query = query.bind(...)` for one static-path parameter,
+/// applying the JSON serialization wrapper for custom (jsonb) types. `owner` is
+/// the value expression (e.g. `name` or `params.name`) and `tmp` the base name
+/// for any intermediate `_json` local. Mirrors `emit_push_bind` but targets the
+/// `sqlx::query(...).bind()` API used by static queries (which keep raw `Option`
+/// arguments, hence the extra optional-scalar case).
+fn emit_static_bind(body: &mut String, ip: &InputParam, owner: &str, tmp: &str) {
+    if ip.needs_json_wrapper {
+        if ip.is_pg_array() {
+            // For jsonb[] columns: serialize each element individually so NULL
+            // elements survive as SQL NULL rather than JSON null.
+            body.push_str(&format!(
+                "    let {t}_json: Vec<Option<serde_json::Value>> = {o}.iter().map(|el| el.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))).collect::<Result<_, _>>()?;\n",
+                t = tmp, o = owner
+            ));
+            body.push_str(&format!("    let query = query.bind({t}_json);\n", t = tmp));
+        } else if ip.is_optional {
+            // Optional custom type: map through Option so None becomes SQL NULL
+            // rather than a JSON null literal.
+            body.push_str(&format!(
+                "    let query = query.bind({o}.as_ref().map(|v| serde_json::to_value(v)).transpose().map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n",
+                o = owner
+            ));
+        } else {
+            // For custom types, serialize to JSON before binding.
+            body.push_str(&format!(
+                "    let query = query.bind(serde_json::to_value(&{o}).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);\n",
+                o = owner
+            ));
+        }
+    } else if ip.rust_type() == "String" {
+        // Bind Strings by reference to avoid moving the argument.
+        body.push_str(&format!("    let query = query.bind(&{o});\n", o = owner));
+    } else {
+        body.push_str(&format!("    let query = query.bind({o});\n", o = owner));
     }
 }
 

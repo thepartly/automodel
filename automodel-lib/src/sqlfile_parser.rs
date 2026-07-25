@@ -74,9 +74,8 @@ fn parse_selector_directive(block_content: &str) -> Option<(String, String, bool
 /// with the selector directive already removed) into its direct parameters and
 /// any nested optional `#[...]` blocks (Option B). Direct parameters are those
 /// referenced outside every nested block and become mandatory variant fields;
-/// each nested block records its exact inner content (so codegen string
-/// replacement matches the base SQL) plus its parameters, which become
-/// `Option<T>` variant fields.
+/// each nested block records its parameters, which become `Option<T>` variant
+/// fields.
 fn split_choice_variant_content(content: &str) -> (Vec<String>, Vec<NestedChoiceBlock>) {
     let chars: Vec<char> = content.chars().collect();
     let mut nested_blocks: Vec<NestedChoiceBlock> = Vec::new();
@@ -109,10 +108,7 @@ fn split_choice_variant_content(content: &str) -> (Vec<String>, Vec<NestedChoice
                     .into_iter()
                     .map(|p| strip_param_suffix(&p))
                     .collect();
-            nested_blocks.push(NestedChoiceBlock {
-                sql_content: inner,
-                params,
-            });
+            nested_blocks.push(NestedChoiceBlock { params });
             i = j;
         } else {
             direct_text.push(chars[i]);

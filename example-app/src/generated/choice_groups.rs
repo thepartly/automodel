@@ -265,7 +265,7 @@ pub enum MultiGroupSearchSort {
 /// Limit
 ///   ->  Sort
 ///         Sort Key: id
-///         ->  Index Scan using idx_users_age on users
+///         ->  Index Scan using idx_users_age_updated_at on users
 ///               Index Cond: (age <= 0)
 ///               Filter: ((email)::text ~~ 'dummy'::text)
 /// 

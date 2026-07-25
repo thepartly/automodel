@@ -204,10 +204,7 @@ pub(crate) struct ChoiceVariant {
     /// branch. Most branches map to a single block, but a branch may span
     /// several blocks when the same `#{selector=variant}` directive is repeated
     /// (e.g. a projection fragment plus a matching `LEFT JOIN` fragment that
-    /// must switch together). For a single-block branch, the matching
-    /// pre-computed SQL lives at `QueryDefinition::sql_variants[block_indices[0] + 1]`
-    /// (index 0 is the base variant with all blocks removed); multi-block
-    /// branches are always handled by the membership-based body generator.
+    /// must switch together).
     pub block_indices: Vec<usize>,
     /// Clean parameter names (suffixes stripped) referenced *directly* in this
     /// branch (outside any nested optional block), in source order, excluding the
@@ -239,12 +236,6 @@ impl ChoiceVariant {
 /// blocks; its parameters therefore surface as `Option<T>` fields on the branch.
 #[derive(Debug, Clone)]
 pub(crate) struct NestedChoiceBlock {
-    /// The inner SQL content (without the surrounding `#[` `]`), exactly as it
-    /// appears inside the branch block. Retained for parser fidelity and future
-    /// codegen use; the QueryBuilder path re-derives it by tokenizing the parent
-    /// block body, so it is not currently read directly.
-    #[allow(dead_code)]
-    pub sql_content: String,
     /// Clean parameter names (suffixes stripped) referenced in this nested block,
     /// in source order. `params[0]` is the include gate.
     pub params: Vec<String>,
