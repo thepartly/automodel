@@ -11,7 +11,11 @@ use crate::types_extractor::QueryTypeInfo;
 use crate::utils::{to_pascal_case, to_snake_case};
 use anyhow::Result;
 
-pub fn generate_root_module(modules: &Vec<String>, source_hash: u64, sharding_enabled: bool) -> String {
+pub fn generate_root_module(
+    modules: &Vec<String>,
+    source_hash: u64,
+    sharding_enabled: bool,
+) -> String {
     let mut mod_content = String::new();
 
     // Add hash comment at the top for consistency with build-time generation
@@ -657,8 +661,7 @@ fn generate_shard_prelude(
             "    if items.iter().skip(1).any(|__am_item| __am_item.{0} != items[0].{0}) {{\n",
             field
         ));
-        prelude
-            .push_str("        return Err(super::ShardError::InconsistentBatch.into());\n");
+        prelude.push_str("        return Err(super::ShardError::InconsistentBatch.into());\n");
         prelude.push_str("    }\n");
         prelude.push_str(&format!(
             "    let mut __am_conn = sharded.resolve(&items[0].{}).await?;\n",
