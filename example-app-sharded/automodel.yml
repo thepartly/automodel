@@ -1,0 +1,13 @@
+queries_dir: queries
+output_dir: src/generated
+
+telemetry:
+  level: debug
+  include_sql: true
+
+# Application-level sharding. The presence of this block enables sharding:
+# every generated function takes `&impl ShardedExecutor` instead of a plain
+# sqlx executor and routes to a shard using the shard-key parameter below.
+sharding:
+  shard_key: user_id
+  key_type: uuid::Uuid

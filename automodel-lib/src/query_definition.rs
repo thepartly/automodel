@@ -167,6 +167,9 @@ pub(crate) struct QueryDefinition {
     /// e.g., ["serde::Serialize", "serde::Deserialize"]
     /// Empty vec means no additional derives
     pub error_type_derives: Vec<String>,
+    /// Per-query override for the sharding parameter name.
+    /// When `None`, the global `sharding.shard_key` is used (if sharding is enabled).
+    pub shard_key: Option<String>,
     /// Canonical token-tree of the query's SQL (comment-free; casts and selector
     /// directives decoded into `Cast` nodes and block gates). The single
     /// structured source of truth from which the SQL template, parameter names,

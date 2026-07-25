@@ -79,6 +79,7 @@ Every field is optional and falls back to a default (`telemetry.level` defaults 
 - `ensure_indexes` → [Telemetry & Query Analysis](14-telemetry-and-analysis.md)
 - `derives` → [Struct Configuration & Reuse](10-struct-config-and-reuse.md)
 - `multiunzip_crate` → [Batch Insert with UNNEST](11-batch-insert-unnest.md)
+- `sharding` → [Application-Level Sharding](sharding.md)
 
 ## 3. Create a `build.rs`
 

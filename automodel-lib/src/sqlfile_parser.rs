@@ -370,6 +370,8 @@ async fn parse_sql_file(
         return_type_derives: Vec<String>,
         #[serde(default)]
         error_type_derives: Vec<String>,
+        #[serde(default)]
+        shard_key: Option<String>,
     }
 
     let metadata: QueryMetadata = if yaml_str.trim().is_empty() {
@@ -448,6 +450,7 @@ async fn parse_sql_file(
             derives.extend(metadata.error_type_derives);
             derives
         },
+        shard_key: metadata.shard_key,
         tree,
     })
 }

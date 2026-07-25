@@ -11,7 +11,7 @@ use crate::types_extractor::QueryTypeInfo;
 use crate::utils::{to_pascal_case, to_snake_case};
 use anyhow::Result;
 
-pub fn generate_root_module(modules: &Vec<String>, source_hash: u64) -> String {
+pub fn generate_root_module(modules: &Vec<String>, source_hash: u64, sharding_enabled: bool) -> String {
     let mut mod_content = String::new();
 
     // Add hash comment at the top for consistency with build-time generation
@@ -34,15 +34,24 @@ pub fn generate_root_module(modules: &Vec<String>, source_hash: u64) -> String {
         mod_content.push('\n');
     }
 
+    // Wire in the sharding runtime module and re-export its public API so that
+    // generated modules can refer to it via `super::`.
+    if sharding_enabled {
+        mod_content.push_str("pub mod sharding;\n");
+        mod_content.push_str(
+            "pub use sharding::{PoolRouter, ShardError, ShardStrategy, ShardedExecutor, ShardedExecutorTransaction, TxGuard};\n\n",
+        );
+    }
+
     // Add generic Error type
-    mod_content.push_str(&generate_generic_error_type());
+    mod_content.push_str(&generate_generic_error_type(sharding_enabled));
 
     mod_content
 }
 
 /// Generate the generic Error<C> type for mod.rs
-pub fn generate_generic_error_type() -> String {
-    r#"#[derive(Debug, Clone)]
+pub fn generate_generic_error_type(sharding_enabled: bool) -> String {
+    let base = r#"#[derive(Debug, Clone)]
 pub struct ErrorConstraintInfo {
     /// Name of the violated constraint
     pub constraint_name: String,
@@ -252,7 +261,82 @@ impl std::error::Error for ErrorReadOnly {
 }
 
 "#
-    .to_string()
+    .to_string();
+
+    if !sharding_enabled {
+        return base;
+    }
+
+    apply_sharding_error_variant(base)
+}
+
+/// Inject the `Sharding(sharding::ShardError)` variant (and its conversions) into
+/// the generated `Error<C>` and `ErrorReadOnly` types. Only applied when sharding
+/// is enabled.
+fn apply_sharding_error_variant(base: String) -> String {
+    let mut s = base;
+
+    // 1. Add the variant to both enum definitions (Error<C> and ErrorReadOnly).
+    //    The `,\n}` closing pattern is unique to the two enum bodies.
+    s = s.replace(
+        "    InternalError(String, sqlx::Error),\n}",
+        "    InternalError(String, sqlx::Error),\n\n    /// Shard routing failure (see `sharding::ShardError`).\n    Sharding(sharding::ShardError),\n}",
+    );
+
+    // 2. Display arm for Error<C>.
+    s = s.replace(
+        "            Error::InternalError(msg, err) => {\n                write!(f, \"Internal error: {}, caused by: {}\", msg, err)\n            }\n        }",
+        "            Error::InternalError(msg, err) => {\n                write!(f, \"Internal error: {}, caused by: {}\", msg, err)\n            }\n            Error::Sharding(err) => write!(f, \"Sharding error: {}\", err),\n        }",
+    );
+
+    // 3. Display arm for ErrorReadOnly.
+    s = s.replace(
+        "            ErrorReadOnly::InternalError(msg, err) => {\n                write!(f, \"Internal error: {}, caused by: {}\", msg, err)\n            }\n        }",
+        "            ErrorReadOnly::InternalError(msg, err) => {\n                write!(f, \"Internal error: {}, caused by: {}\", msg, err)\n            }\n            ErrorReadOnly::Sharding(err) => write!(f, \"Sharding error: {}\", err),\n        }",
+    );
+
+    // 4. source() arm for Error<C>.
+    s = s.replace(
+        "            Error::InternalError(_, err) => Some(err),\n            _ => None,",
+        "            Error::InternalError(_, err) => Some(err),\n            Error::Sharding(err) => Some(err),\n            _ => None,",
+    );
+
+    // 5. source() arm for ErrorReadOnly.
+    s = s.replace(
+        "            Self::InternalError(_, err) => Some(err),\n            _ => None,",
+        "            Self::InternalError(_, err) => Some(err),\n            Self::Sharding(err) => Some(err),\n            _ => None,",
+    );
+
+    // 6. `Into<Error> for ErrorReadOnly` arm.
+    s = s.replace(
+        "            ErrorReadOnly::InternalError(msg, err) => Error::InternalError(msg, err),\n        }",
+        "            ErrorReadOnly::InternalError(msg, err) => Error::InternalError(msg, err),\n            ErrorReadOnly::Sharding(err) => Error::Sharding(err),\n        }",
+    );
+
+    // 7. `From<Error> for ErrorReadOnly` arm.
+    s = s.replace(
+        "            Error::InternalError(msg, err) => Self::InternalError(msg, err),\n            Error::ConstraintViolation(c, info)",
+        "            Error::InternalError(msg, err) => Self::InternalError(msg, err),\n            Error::Sharding(err) => Self::Sharding(err),\n            Error::ConstraintViolation(c, info)",
+    );
+
+    // 8. `From<sharding::ShardError>` for both error types.
+    s.push_str(
+        r#"impl<C: TryFrom<ErrorConstraintInfo>> From<sharding::ShardError> for Error<C> {
+    fn from(err: sharding::ShardError) -> Self {
+        Error::Sharding(err)
+    }
+}
+
+impl From<sharding::ShardError> for ErrorReadOnly {
+    fn from(err: sharding::ShardError) -> Self {
+        ErrorReadOnly::Sharding(err)
+    }
+}
+
+"#,
+    );
+
+    s
 }
 
 /// Generate per-query constraint enum with TryFrom<ErrorConstraintInfo> implementation
@@ -351,7 +435,11 @@ fn remove_plan_statistics(line: &str) -> String {
 }
 
 /// Generate tracing::instrument attribute for a function
-fn generate_tracing_attribute(query: &QueryDefinition, param_names: &[String]) -> String {
+fn generate_tracing_attribute(
+    query: &QueryDefinition,
+    param_names: &[String],
+    executor_arg_name: &str,
+) -> String {
     use std::collections::HashSet;
 
     let telemetry_level = query.telemetry.level;
@@ -374,7 +462,7 @@ fn generate_tracing_attribute(query: &QueryDefinition, param_names: &[String]) -
 
     // Determine parameter skipping strategy
     let mut skip_params = HashSet::new();
-    skip_params.insert("executor".to_string());
+    skip_params.insert(executor_arg_name.to_string());
 
     // Parameter inclusion logic (independent of telemetry level)
     if let Some(include_params) = &query.telemetry.include_params {
@@ -434,6 +522,162 @@ fn generate_tracing_attribute(query: &QueryDefinition, param_names: &[String]) -
     }
 
     format!("#[tracing::instrument({})]\n", attributes.join(", "))
+}
+
+/// Return the final path segment of a Rust type path (e.g. `uuid::Uuid` -> `Uuid`),
+/// ignoring any surrounding whitespace. Used for loose shard-key type comparison.
+fn last_type_segment(ty: &str) -> &str {
+    ty.rsplit("::").next().unwrap_or(ty).trim()
+}
+
+/// If `ty` is a `Vec<T>`, return the inner `T` (trimmed); otherwise `None`.
+/// Used so a batch (multiunzip) shard key of type `Vec<T>` is validated against
+/// its element type `T`.
+fn unwrap_vec_type(ty: &str) -> Option<&str> {
+    let t = ty.trim();
+    let inner = t.strip_prefix("Vec<")?.strip_suffix('>')?;
+    Some(inner.trim())
+}
+
+/// Validate that a query is compatible with application-level sharding and
+/// return the effective shard-key parameter name (per-query `shard_key` override
+/// falling back to the global `sharding.shard_key`).
+///
+/// A sharded query must expose the shard key as a required, non-nullable
+/// parameter of the configured `key_type`. It may not be a choice-group
+/// selector/branch parameter, and `conditions_type` is not supported.
+fn validate_and_build_shard_context(
+    query: &QueryDefinition,
+    type_info: &QueryTypeInfo,
+    clean_param_names: &[String],
+    sharding: &crate::ShardingConfig,
+    use_conditional_diff: bool,
+    use_multiunzip: bool,
+    choice_groups: &[crate::sql_tree::ChoiceGroup],
+) -> Result<String> {
+    let shard_name = query
+        .shard_key
+        .clone()
+        .unwrap_or_else(|| sharding.shard_key.clone());
+
+    if use_conditional_diff {
+        return Err(anyhow::anyhow!(
+            "Query '{}': application-level sharding is not supported together with conditions_type. Remove conditions_type for sharded queries.",
+            query.name
+        ));
+    }
+
+    // The shard key must be a plain (non-grouped) parameter so it is always
+    // available as a function argument / struct field.
+    for group in choice_groups {
+        if group.selector == shard_name {
+            return Err(anyhow::anyhow!(
+                "Query '{}': shard key '{}' cannot be a choice-group selector.",
+                query.name,
+                shard_name
+            ));
+        }
+        for variant in &group.variants {
+            if variant.all_params().contains(&shard_name) {
+                return Err(anyhow::anyhow!(
+                    "Query '{}': shard key '{}' cannot be a parameter inside a choice group.",
+                    query.name,
+                    shard_name
+                ));
+            }
+        }
+    }
+
+    let idx = clean_param_names
+        .iter()
+        .position(|n| n == &shard_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Query '{}': shard key '{}' is not a parameter of this query. Every sharded query must accept the shard key as a required parameter.",
+                query.name,
+                shard_name
+            )
+        })?;
+
+    let param = &type_info.input_types[idx];
+    if param.is_optional || param.is_nullable {
+        return Err(anyhow::anyhow!(
+            "Query '{}': shard key '{}' must be a required, non-nullable parameter (it cannot live inside a conditional block or be nullable).",
+            query.name,
+            shard_name
+        ));
+    }
+
+    let actual = param.rust_type().to_string();
+    // For batch (multiunzip) queries the shard key parameter is an array
+    // (`Vec<T>`, one value per row) but each record field — and the runtime
+    // consistency check — operates on the element type `T`. Compare against `T`.
+    let effective = if use_multiunzip {
+        unwrap_vec_type(&actual).unwrap_or(actual.as_str())
+    } else {
+        actual.as_str()
+    };
+    if last_type_segment(effective) != last_type_segment(&sharding.key_type) {
+        return Err(anyhow::anyhow!(
+            "Query '{}': shard key '{}' has type '{}' but the configured sharding key_type is '{}'.",
+            query.name,
+            shard_name,
+            effective,
+            sharding.key_type
+        ));
+    }
+
+    Ok(shard_name)
+}
+
+/// Emit the shard-resolution prelude that runs at the top of a sharded query
+/// function. It binds a local `executor` (a `&mut sqlx::PgConnection`) obtained
+/// from `sharded.resolve(..)`, which the rest of the generated body uses exactly
+/// as it would a plain sqlx executor.
+fn generate_shard_prelude(
+    type_info: &QueryTypeInfo,
+    shard_name: &str,
+    use_multiunzip: bool,
+    use_structured_params: bool,
+) -> String {
+    let mut prelude = String::new();
+
+    if use_multiunzip {
+        // Batch insert: the whole batch must target a single shard.
+        let field = to_snake_case(shard_name);
+        let empty_val = if type_info.output_types.is_empty() {
+            "()"
+        } else {
+            "Vec::new()"
+        };
+        prelude.push_str("    if items.is_empty() {\n");
+        prelude.push_str(&format!("        return Ok({});\n", empty_val));
+        prelude.push_str("    }\n");
+        prelude.push_str(&format!(
+            "    if items.iter().skip(1).any(|__am_item| __am_item.{0} != items[0].{0}) {{\n",
+            field
+        ));
+        prelude
+            .push_str("        return Err(super::ShardError::InconsistentBatch.into());\n");
+        prelude.push_str("    }\n");
+        prelude.push_str(&format!(
+            "    let mut __am_conn = sharded.resolve(&items[0].{}).await?;\n",
+            field
+        ));
+    } else {
+        let access = if use_structured_params {
+            format!("params.{}", shard_name)
+        } else {
+            shard_name.to_string()
+        };
+        prelude.push_str(&format!(
+            "    let mut __am_conn = sharded.resolve(&{}).await?;\n",
+            access
+        ));
+    }
+
+    prelude.push_str("    let executor = &mut *__am_conn;\n");
+    prelude
 }
 
 /// Generate an indented raw string literal with proper formatting
@@ -637,6 +881,29 @@ pub fn generate_function_code_without_enums(
         }
     }
 
+    // Application-level sharding: validate the shard key and compute its name.
+    // When sharding is enabled every generated function receives a
+    // `&impl super::ShardedExecutor` instead of a plain sqlx executor and
+    // resolves the target shard from the shard key parameter.
+    let shard_name: Option<String> = if let Some(sharding) = &defaults.sharding {
+        Some(validate_and_build_shard_context(
+            query,
+            type_info,
+            &clean_param_names,
+            sharding,
+            use_conditional_diff,
+            use_multiunzip,
+            &choice_groups,
+        )?)
+    } else {
+        None
+    };
+    let executor_arg_name = if defaults.sharding.is_some() {
+        "sharded"
+    } else {
+        "executor"
+    };
+
     // Generate function documentation
     if let Some(description) = &query.description {
         code.push_str(&format!("/// {}\n", description));
@@ -659,9 +926,9 @@ pub fn generate_function_code_without_enums(
     let tracing_attribute = if !choice_groups.is_empty() {
         // Variant fields are not function arguments; only skip real args.
         let arg_names = choice_group_arg_names(query, type_info, &choice_groups);
-        generate_tracing_attribute(query, &arg_names)
+        generate_tracing_attribute(query, &arg_names, executor_arg_name)
     } else {
-        generate_tracing_attribute(query, &clean_param_names)
+        generate_tracing_attribute(query, &clean_param_names, executor_arg_name)
     };
     code.push_str(&tracing_attribute);
 
@@ -699,13 +966,15 @@ pub fn generate_function_code_without_enums(
     };
 
     // Generate function signature
-    let params_str = if input_params.is_empty() {
-        "executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>".to_string()
+    let executor_param = if defaults.sharding.is_some() {
+        "sharded: &impl super::ShardedExecutor".to_string()
     } else {
-        format!(
-            "executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, {}",
-            input_params
-        )
+        "executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>".to_string()
+    };
+    let params_str = if input_params.is_empty() {
+        executor_param
+    } else {
+        format!("{}, {}", executor_param, input_params)
     };
 
     let return_type = if type_info.output_types.is_empty() {
@@ -763,6 +1032,14 @@ pub fn generate_function_code_without_enums(
     } else {
         generate_function_body(query, type_info, &base_return_type, defaults)?
     };
+    if let Some(ref sn) = shard_name {
+        code.push_str(&generate_shard_prelude(
+            type_info,
+            sn,
+            use_multiunzip,
+            use_structured_params,
+        ));
+    }
     code.push_str(&function_body);
 
     code.push_str("}\n");

@@ -68,6 +68,7 @@ SELECT id, name FROM users WHERE id = #{id}
 | `conditions_type` | bool \| string | `false` | Diff-based conditional parameters via old/new struct. | [Struct Config & Reuse](10-struct-config-and-reuse.md) |
 | `return_type` | string | `{QueryName}Item` | Custom name for the return struct (enables reuse). | [Struct Config & Reuse](10-struct-config-and-reuse.md) |
 | `error_type` | string | `{QueryName}Constraints` | Custom name for the constraint enum (mutations only). | [Error Handling](13-error-handling.md) |
+| `shard_key` | string | global `sharding.shard_key` | Override the parameter used to route this query to a shard. | [Application-Level Sharding](sharding.md) |
 | `conditions_type_derives` | list | none | Extra derives for the conditions struct. | [Struct Config & Reuse](10-struct-config-and-reuse.md#custom-derive-traits) |
 | `parameters_type_derives` | list | none | Extra derives for the parameters struct. | [Struct Config & Reuse](10-struct-config-and-reuse.md#custom-derive-traits) |
 | `return_type_derives` | list | none | Extra derives for the return struct. | [Struct Config & Reuse](10-struct-config-and-reuse.md#custom-derive-traits) |

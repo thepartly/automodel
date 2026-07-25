@@ -36,6 +36,26 @@ impl Default for MultiunzipCrate {
     }
 }
 
+fn default_shard_key_type() -> String {
+    "uuid::Uuid".to_string()
+}
+
+/// Application-level sharding configuration.
+///
+/// The mere presence of this block (i.e. a `shard_key`) enables sharding: every
+/// generated function is emitted in its sharded form (accepting a
+/// `&impl ShardedExecutor` instead of a plain `sqlx::Executor`), and every query
+/// is required to have a non-optional parameter matching the shard key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShardingConfig {
+    /// Default name of the parameter that determines the shard for a query.
+    /// Can be overridden per query via the `shard_key` metadata field.
+    pub shard_key: String,
+    /// Rust type of the shard key. Defaults to `uuid::Uuid`.
+    #[serde(default = "default_shard_key_type")]
+    pub key_type: String,
+}
+
 /// Default configuration for telemetry and analysis
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DefaultsConfig {
@@ -58,6 +78,10 @@ pub struct DefaultsConfig {
     /// Defaults to Itertools
     #[serde(default)]
     pub multiunzip_crate: MultiunzipCrate,
+    /// Application-level sharding configuration. When `Some`, sharding is enabled
+    /// and every generated function is emitted in its sharded form.
+    #[serde(default)]
+    pub sharding: Option<ShardingConfig>,
 }
 
 /// Default configuration for telemetry and analysis
@@ -136,6 +160,9 @@ pub struct AutoModelConfig {
     /// Crate to use for multiunzip operations in batch inserts
     #[serde(default)]
     pub multiunzip_crate: MultiunzipCrate,
+    /// Application-level sharding configuration. Presence enables sharding.
+    #[serde(default)]
+    pub sharding: Option<ShardingConfig>,
 }
 
 fn default_queries_dir() -> String {
@@ -162,6 +189,7 @@ impl AutoModelConfig {
             ensure_indexes: self.ensure_indexes,
             derives: self.derives.clone(),
             multiunzip_crate: self.multiunzip_crate.clone(),
+            sharding: self.sharding.clone(),
         }
     }
 }
@@ -420,10 +448,18 @@ impl AutoModel {
         }
 
         // Create the main mod.rs file
+        let sharding_enabled = self.defaults.sharding.is_some();
         let mod_file = output_path.join("mod.rs");
-        let mut mod_content = generate_root_module(&modules, source_hash);
+        let mut mod_content = generate_root_module(&modules, source_hash, sharding_enabled);
         mod_content.push_str("pub mod types;\n");
         fs::write(&mod_file, &mod_content)?;
+
+        // Emit the self-contained sharding runtime when sharding is enabled.
+        if let Some(sharding) = &self.defaults.sharding {
+            let sharding_file = output_path.join("sharding.rs");
+            let sharding_code = crate::codegen::generate_sharding_runtime(&sharding.key_type);
+            fs::write(&sharding_file, &sharding_code)?;
+        }
 
         // Write all warnings to automodel.warn file only if there are warnings
         let warn_file = output_path.join("automodel.warn");

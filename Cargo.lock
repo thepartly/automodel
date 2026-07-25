@@ -637,6 +637,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-app-sharded"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automodel",
+ "itertools",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

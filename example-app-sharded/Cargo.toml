@@ -1,0 +1,24 @@
+[package]
+name = "example-app-sharded"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "example_app_sharded"
+path = "src/lib.rs"
+
+[[bin]]
+name = "example-app-sharded"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+sqlx = { workspace = true }
+uuid = { version = "1", features = ["serde", "v4"] }
+tracing = "0.1"
+itertools = "0.13"
+
+[build-dependencies]
+automodel = { path = "../automodel-lib" }
+tokio = { workspace = true, features = ["rt"] }
+anyhow = { workspace = true }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["automodel-lib", "automodel-cli", "example-app"]
+members = ["automodel-lib", "automodel-cli", "example-app", "example-app-sharded"]
 
 resolver = "2"
 

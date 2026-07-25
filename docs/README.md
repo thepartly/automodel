@@ -57,6 +57,9 @@ for Rust. Start at the top and work down; each page builds on the previous one.
 
 ## Advanced guides
 
+- [Application-Level Sharding](sharding.md) — route generated queries across
+  multiple databases by a shard-key parameter, with pinned transactions and
+  batch-consistency checks.
 - [Composite Types vs JSONB](composite-types-vs-jsonb.md) — choosing between
   PostgreSQL composite types and JSONB columns, with schema-evolution best practices.
 
