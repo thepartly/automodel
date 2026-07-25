@@ -87,8 +87,13 @@ pub trait ShardedExecutor<K = uuid::Uuid> {
 }
 
 /// Routes queries across a fixed set of per-shard connection pools using a
-/// [`ShardStrategy`]. Cheap to clone (pools are `Arc`-backed); clone it per task
-/// for concurrent work.
+/// [`ShardStrategy`].
+///
+/// `resolve` takes `&self`, so the common case is to share a single
+/// `&PoolRouter` (or an `Arc<PoolRouter>`) across tasks — no clone required.
+/// Cloning is supported but is O(shard_count): it allocates a new pool `Vec` and
+/// bumps each pool's `Arc` refcount (plus clones the strategy). It never opens
+/// new connections. For a cheap, O(1) shared handle, wrap it in `Arc`.
 #[derive(Clone)]
 pub struct PoolRouter<K, S> {
     pools: Vec<sqlx::PgPool>,
