@@ -1122,6 +1122,59 @@ LIMIT ");
 }
 
 #[derive(Debug, Clone)]
+pub struct ConditionalNullOutputColumnRow {
+    pub id: i32,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConditionalNullOutputColumnNameIncl {
+    On,
+    Off,
+}
+
+/// Output column conditionally replaced by a NULL literal via a choice group
+///
+/// Query Plan:
+/// === conditional_null_output_column (base) ===
+/// Index Scan using users_pkey on users
+///   Filter: (age >= 0)
+/// 
+/// === conditional_null_output_column (variant 1) ===
+/// Index Scan using users_pkey on users
+///   Filter: (age >= 0)
+#[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "choice_groups/conditional_null_output_column", db.query.text = tracing::field::Empty))]
+pub async fn conditional_null_output_column(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>, min_age: i32, name_incl: ConditionalNullOutputColumnNameIncl) -> Result<Vec<ConditionalNullOutputColumnRow>, super::ErrorReadOnly> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    qb.push(r"SELECT
+    id,
+    ");
+    if let ConditionalNullOutputColumnNameIncl::On = &name_incl {
+        qb.push(r"name");
+    }
+    if let ConditionalNullOutputColumnNameIncl::Off = &name_incl {
+        qb.push(r"NULL::text");
+    }
+    qb.push(r" AS name
+FROM public.users
+WHERE age >= ");
+    qb.push_bind(&min_age);
+    qb.push(r"
+ORDER BY id ASC");
+    tracing::Span::current().record("db.query.text", qb.sql());
+    let query = qb.build();
+
+    let rows = query.fetch_all(executor).await?;
+    let result: Result<Vec<_>, sqlx::Error> = rows.iter().map(|row| {
+        Ok(ConditionalNullOutputColumnRow {
+        id: row.try_get::<i32, _>("id")?,
+        name: row.try_get::<Option<String>, _>("name")?,
+    })
+    }).collect();
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
 pub struct ReproCombinedCursorSortItem {
     pub id: i32,
     pub name: String,

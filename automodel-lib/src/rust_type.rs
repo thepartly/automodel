@@ -618,6 +618,13 @@ impl std::ops::Deref for InputParam {
 #[derive(Debug, Clone)]
 pub struct OutputColumn {
     pub field: StructField,
+    /// Whether this column is backed by a real table column (has a table OID and
+    /// attribute number) as opposed to a computed expression such as a literal,
+    /// function result, or a `NULL` placeholder. Used when merging the output
+    /// columns of different choice-group branches: a type conflict is only a hard
+    /// error when *both* sides are real columns, since a `NULL`/literal branch is
+    /// intentionally type-compatible with the concrete column in another branch.
+    pub table_backed: bool,
 }
 
 impl std::ops::Deref for OutputColumn {

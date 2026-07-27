@@ -85,13 +85,20 @@ pub async fn extract_query_types(
             param_types.entry(name.clone()).or_insert(input);
         }
 
-        if !have_output {
-            let outputs =
-                extract_output_types(client, &statement, field_type_mappings, non_null_columns)
-                    .await?;
-            if !outputs.is_empty() {
+        // Output columns are captured from every preparable variant and merged:
+        // a column is nullable if it is nullable in *any* branch. A SELECT-list
+        // choice group such as `#[#{f=on} col]#[#{f=off} NULL::t] AS col` yields a
+        // NOT NULL column in one branch and a NULL literal in another; taking only
+        // the first branch would wrongly emit a required (non-`Option`) field that
+        // panics at runtime when a NULL-producing branch is selected.
+        let outputs =
+            extract_output_types(client, &statement, field_type_mappings, non_null_columns).await?;
+        if !outputs.is_empty() {
+            if !have_output {
                 output_types = outputs;
                 have_output = true;
+            } else {
+                merge_output_nullability(&mut output_types, &outputs)?;
             }
         }
 
@@ -601,6 +608,67 @@ async fn get_column_metadata(
     Ok(metadata)
 }
 
+/// Merge the output columns of a later EXPLAIN variant into the columns captured
+/// from an earlier one. Nullability is unioned — a column becomes nullable if it
+/// is nullable in *any* branch (e.g. a SELECT-list choice group where one branch
+/// selects a NOT NULL column and another selects a NULL literal).
+///
+/// The result shape must be stable across branches: a differing column count or a
+/// differing column at the same position is a query-authoring error and is
+/// reported. A *type* conflict is reported only when both sides are real
+/// table-backed columns — the common, legitimate `#[#{f=off} NULL] AS col`
+/// pattern deliberately pairs a concrete column in one branch with a NULL/literal
+/// placeholder (which surfaces as an unrelated type) in another, and that is not
+/// an error.
+fn merge_output_nullability(merged: &mut [OutputColumn], next: &[OutputColumn]) -> Result<()> {
+    if merged.len() != next.len() {
+        anyhow::bail!(
+            "Query branches produce different numbers of output columns ({} vs {}). \
+             Every branch of a choice group must yield the same result columns.",
+            merged.len(),
+            next.len()
+        );
+    }
+    for (m, n) in merged.iter_mut().zip(next.iter()) {
+        if m.field.pg_name != n.field.pg_name {
+            anyhow::bail!(
+                "Query branches disagree on the output column at the same position: \
+                 '{}' vs '{}'. Every branch of a choice group must yield the same \
+                 result columns in the same order.",
+                m.field.pg_name,
+                n.field.pg_name
+            );
+        }
+        let m_type = m
+            .field
+            .mapped_type_ref
+            .as_deref()
+            .unwrap_or(&m.field.type_ref);
+        let n_type = n
+            .field
+            .mapped_type_ref
+            .as_deref()
+            .unwrap_or(&n.field.type_ref);
+        if (m_type != n_type || m.field.needs_json_wrapper != n.field.needs_json_wrapper)
+            && m.table_backed
+            && n.table_backed
+        {
+            anyhow::bail!(
+                "Output column '{}' has conflicting types across query branches: \
+                 `{}` vs `{}`. Every branch of a choice group must produce the same \
+                 type for a real column.",
+                m.field.pg_name,
+                m_type,
+                n_type
+            );
+        }
+        if n.field.is_nullable {
+            m.field.is_nullable = true;
+        }
+    }
+    Ok(())
+}
+
 /// Extract output column types from a prepared statement
 async fn extract_output_types(
     client: &tokio_postgres::Client,
@@ -684,6 +752,10 @@ async fn extract_output_types(
             final_nullable
         };
 
+        // A column is "table-backed" when it maps to a real table attribute.
+        // Computed expressions (literals, `NULL`, function results) have no OID.
+        let table_backed = column.table_oid().is_some() && column.column_id().is_some();
+
         output_types.push(OutputColumn {
             field: StructField {
                 pg_name: column_name.to_string(),
@@ -693,6 +765,7 @@ async fn extract_output_types(
                 mapped_type_ref,
                 needs_json_wrapper,
             },
+            table_backed,
         });
     }
 

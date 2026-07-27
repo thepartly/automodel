@@ -109,6 +109,48 @@ async fn choice_group_binds_borrowed_array_params() {
     assert_eq!(out[1].id, rows[1].id);
 }
 
+/// Regression: an output column conditionally replaced by a NULL literal via a
+/// choice group must be generated as `Option<T>`. The `off` branch selects
+/// `NULL::text AS name`, so the column can be NULL even though the underlying
+/// `name` column is NOT NULL.
+///
+/// Nullability is now merged across every EXPLAIN variant (nullable if any branch
+/// yields NULL), so the field is `Option<String>` and both branches decode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conditional_null_output_column_nullability() {
+    let pool = common::get_pool().await;
+    let (_prefix, _rows) = seed(pool).await;
+
+    // `on` branch selects the real NOT NULL column — decodes to Some(name).
+    let on = generated::choice_groups::conditional_null_output_column(
+        pool,
+        0,
+        generated::choice_groups::ConditionalNullOutputColumnNameIncl::On,
+    )
+    .await
+    .expect("on branch should decode the real name column");
+    assert!(!on.is_empty(), "seeded users have age >= 0");
+    assert!(
+        on.iter().all(|r| r.name.is_some()),
+        "on branch selects the NOT NULL column, so every name is Some"
+    );
+
+    // `off` branch selects `NULL::text AS name`; the field is `Option<String>`,
+    // so decoding the SQL NULL succeeds and yields None.
+    let off = generated::choice_groups::conditional_null_output_column(
+        pool,
+        0,
+        generated::choice_groups::ConditionalNullOutputColumnNameIncl::Off,
+    )
+    .await
+    .expect("off branch must decode NULL into Option<String>");
+    assert!(!off.is_empty(), "off branch returns the same rows");
+    assert!(
+        off.iter().all(|r| r.name.is_none()),
+        "off branch selects NULL::text, so every name is None"
+    );
+}
+
 /// Optional choice group: `None` selects the base query (no ORDER BY), while
 /// each `Some(variant)` applies exactly one ordering.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
