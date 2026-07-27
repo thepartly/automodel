@@ -568,8 +568,7 @@ pub async fn get_user_count_and_avg_age(executor: impl sqlx::Executor<'_, Databa
 ///
 /// Query Plan:
 /// Aggregate
-///   ->  Bitmap Heap Scan on users
-///         ->  Bitmap Index Scan on idx_users_age
+///   ->  Index Only Scan using users_pkey on users
 #[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "analytics/get_non_null_count_expression", db.query.text = "SELECT count(*) + count(*) AS total FROM public.users"))]
 pub async fn get_non_null_count_expression(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<i64, super::ErrorReadOnly> {
     let query = sqlx::query(
@@ -592,8 +591,7 @@ pub struct GetNonNullMultiFieldsItem {
 ///
 /// Query Plan:
 /// Aggregate
-///   ->  Bitmap Heap Scan on users
-///         ->  Bitmap Index Scan on idx_users_age
+///   ->  Index Only Scan using users_pkey on users
 #[tracing::instrument(level = "debug", skip_all, fields(db.operation.name = "analytics/get_non_null_multi_fields", db.query.text = "SELECT\n  count(*) AS user_count,\n  count(*) + count(*) AS double_count,\n  true AS is_valid,\n  now() AS current_time,\n  'hello' AS greeting\nFROM public.users"))]
 pub async fn get_non_null_multi_fields(executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>) -> Result<GetNonNullMultiFieldsItem, super::ErrorReadOnly> {
     let query = sqlx::query(
